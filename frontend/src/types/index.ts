@@ -66,6 +66,7 @@ export interface UpdateNetworkPayload {
 export interface CreateDevicePayload {
   network_code: string
   device_id: string
+  device_name?: string
   ip: string
   ip_type?: DeviceIpType
   client_type: ClientType
@@ -74,6 +75,7 @@ export interface CreateDevicePayload {
 
 export interface UpdateDevicePayload {
   network_code: string
+  device_name?: string
   ip: string
   ip_type: DeviceIpType
   ikev2_password?: string

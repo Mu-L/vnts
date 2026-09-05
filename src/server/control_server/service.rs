@@ -364,13 +364,17 @@ impl ControlService {
         &self,
         network_code: String,
         device_id: String,
-        device_name: String,
         sender: Sender<Bytes>,
     ) -> anyhow::Result<Session> {
         let config = self.network_config(&network_code, None)?;
         let state = self
             .get_or_create_network_state(network_code.clone(), config)
             .await;
+        let device_name = state
+            .get_device_entry(&device_id)
+            .filter(|entry| entry.client_type == ClientType::Ikev2)
+            .map(|entry| entry.device_name)
+            .with_context(|| format!("IKEv2 设备 '{}' 未由管理员预先创建", device_id))?;
         let remote_ips = self
             .get_peer_manager()
             .map(|manager| manager.remote_online_ips(&network_code))
@@ -753,6 +757,7 @@ impl ControlService {
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
         ikev2_password: Option<String>,
+        device_name: Option<String>,
         mutation: DeviceMutation,
     ) -> anyhow::Result<()> {
         if device_id.is_empty()
@@ -800,6 +805,9 @@ impl ControlService {
                 if ikev2_password.is_some() {
                     bail!("VNT 设备不能配置 IKEv2 密码");
                 }
+                if device_name.is_some() {
+                    bail!("VNT 设备不能配置设备名称");
+                }
                 None
             }
             ClientType::Ikev2 => {
@@ -822,6 +830,21 @@ impl ControlService {
                 password
             }
         };
+        let device_name = match client_type {
+            ClientType::Vnt => existing
+                .as_ref()
+                .map(|entry| entry.device_name.clone())
+                .unwrap_or_else(|| device_id.to_string()),
+            ClientType::Ikev2 => device_name
+                .or_else(|| existing.as_ref().map(|entry| entry.device_name.clone()))
+                .unwrap_or_else(|| device_id.to_string()),
+        };
+        if device_name.is_empty()
+            || device_name.trim() != device_name
+            || device_name.len() > RegRequestMsg::MAX_NAME_LEN
+        {
+            bail!("无效的设备名称");
+        }
 
         if matches!(mutation, DeviceMutation::Update)
             && existing
@@ -832,7 +855,14 @@ impl ControlService {
             manager.disconnect_device(network_code, device_id).await;
         }
 
-        let previous = state.upsert_device_config(device_id, ip, ip_type, client_type, password)?;
+        let previous = state.upsert_device_config(
+            device_id,
+            device_name,
+            ip,
+            ip_type,
+            client_type,
+            password,
+        )?;
         let record = state
             .get_device_entry(device_id)
             .ok_or_else(|| anyhow::anyhow!("设备状态更新失败"))?
@@ -855,6 +885,7 @@ impl ControlService {
         ip_type: DeviceIpType,
         client_type: ClientType,
         ikev2_password: Option<String>,
+        device_name: Option<String>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -862,6 +893,7 @@ impl ControlService {
             ip,
             ip_type,
             ikev2_password,
+            device_name,
             DeviceMutation::Create(client_type),
         )
         .await
@@ -875,8 +907,16 @@ impl ControlService {
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
     ) -> anyhow::Result<()> {
-        self.add_device_typed(network_code, device_id, ip, ip_type, ClientType::Vnt, None)
-            .await
+        self.add_device_typed(
+            network_code,
+            device_id,
+            ip,
+            ip_type,
+            ClientType::Vnt,
+            None,
+            None,
+        )
+        .await
     }
 
     pub async fn update_device_with_password(
@@ -886,6 +926,7 @@ impl ControlService {
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
         ikev2_password: Option<String>,
+        device_name: Option<String>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -893,6 +934,7 @@ impl ControlService {
             ip,
             ip_type,
             ikev2_password,
+            device_name,
             DeviceMutation::Update,
         )
         .await
@@ -906,7 +948,7 @@ impl ControlService {
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
     ) -> anyhow::Result<()> {
-        self.update_device_with_password(network_code, device_id, ip, ip_type, None)
+        self.update_device_with_password(network_code, device_id, ip, ip_type, None, None)
             .await
     }
 
@@ -2033,6 +2075,7 @@ mod tests {
                     DeviceIpType::Fixed,
                     ClientType::Ikev2,
                     None,
+                    None,
                 )
                 .await
                 .is_err()
@@ -2045,6 +2088,7 @@ mod tests {
                 DeviceIpType::Fixed,
                 ClientType::Ikev2,
                 Some("old-password".to_string()),
+                Some("Alice Phone".to_string()),
             )
             .await
             .unwrap();
@@ -2057,6 +2101,7 @@ mod tests {
                     DeviceIpType::Fixed,
                     ClientType::Ikev2,
                     Some("other-password".to_string()),
+                    None,
                 )
                 .await
                 .is_err()
@@ -2072,12 +2117,7 @@ mod tests {
         let (sender, _) = mpsc::channel(8);
         assert!(
             service
-                .register_ikev2(
-                    "ike-a".to_string(),
-                    "unknown".to_string(),
-                    "unknown".to_string(),
-                    sender,
-                )
+                .register_ikev2("ike-a".to_string(), "unknown".to_string(), sender,)
                 .await
                 .is_err()
         );
@@ -2089,6 +2129,7 @@ mod tests {
                 "10.92.0.9".parse().unwrap(),
                 DeviceIpType::Static,
                 Some("new-password".to_string()),
+                Some("Alice Tablet".to_string()),
             )
             .await
             .unwrap();
@@ -2099,10 +2140,30 @@ mod tests {
             .unwrap();
         assert_eq!(record.client_type, ClientType::Ikev2);
         assert_eq!(record.ikev2_password.as_deref(), Some("new-password"));
+        assert_eq!(record.device_name, "Alice Tablet");
         assert_eq!(
             service.ikev2_credentials().await.unwrap().get("alice"),
             Some(&("ike-a".to_string(), "new-password".to_string()))
         );
+
+        service
+            .update_device_with_password(
+                "ike-a",
+                "alice",
+                "10.92.0.9".parse().unwrap(),
+                DeviceIpType::Static,
+                None,
+                Some("Alice Laptop".to_string()),
+            )
+            .await
+            .unwrap();
+        let record = service
+            .get_device_record("ike-a", "alice")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.device_name, "Alice Laptop");
+        assert_eq!(record.ikev2_password.as_deref(), Some("new-password"));
     }
 
     #[tokio::test]
@@ -2128,19 +2189,22 @@ mod tests {
                 DeviceIpType::Fixed,
                 ClientType::Ikev2,
                 Some("password".to_string()),
+                Some("Office Phone".to_string()),
             )
             .await
             .unwrap();
         let (ike_sender, mut ike_receiver) = mpsc::channel(8);
         let ike = service
-            .register_ikev2(
-                "ike-access".to_string(),
-                "phone".to_string(),
-                "phone".to_string(),
-                ike_sender,
-            )
+            .register_ikev2("ike-access".to_string(), "phone".to_string(), ike_sender)
             .await
             .unwrap();
+        assert_eq!(
+            ike.network_state
+                .get_device_entry("phone")
+                .unwrap()
+                .device_name,
+            "Office Phone"
+        );
 
         let hidden = vnt.network_state.full_client_simple_list(vnt.ip, false);
         assert!(!hidden.list.iter().any(|client| client.ip == ike.ip));

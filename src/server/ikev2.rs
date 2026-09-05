@@ -775,12 +775,7 @@ impl Engine {
         let (sender, receiver) = mpsc::channel(1024);
         let session = self
             .control
-            .register_ikev2(
-                network_code.to_string(),
-                identity.to_string(),
-                identity.to_string(),
-                sender,
-            )
+            .register_ikev2(network_code.to_string(), identity.to_string(), sender)
             .await?;
         Ok((session, receiver))
     }
@@ -1582,6 +1577,7 @@ mod tests {
                 DeviceIpType::Fixed,
                 ClientType::Ikev2,
                 Some("password".to_string()),
+                Some("Alice's device".to_string()),
             )
             .await
             .unwrap();

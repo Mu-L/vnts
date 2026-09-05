@@ -78,6 +78,7 @@ const editingDevice = ref<DeviceInfo | null>(null)
 const formSubmitting = ref(false)
 const deviceForm = ref({
   device_id: '',
+  device_name: '',
   ip: '',
   ip_type: 'Dynamic' as DeviceIpType,
   client_type: 'VNT' as ClientType,
@@ -183,7 +184,7 @@ async function copyCredential(value: string) {
 
 function openCreateDevice() {
   editingDevice.value = null
-  deviceForm.value = { device_id: '', ip: '', ip_type: 'Dynamic', client_type: 'VNT', ikev2_password: '' }
+  deviceForm.value = { device_id: '', device_name: '', ip: '', ip_type: 'Dynamic', client_type: 'VNT', ikev2_password: '' }
   generateDeviceId()
   showIkev2Password.value = false
   showDeviceModal.value = true
@@ -207,6 +208,7 @@ function openEditDevice(group: DeviceGroup) {
   editingDevice.value = device
   deviceForm.value = {
     device_id: device.device_id,
+    device_name: device.device_name,
     ip: device.ip ?? '',
     ip_type: device.ip_type ?? 'Dynamic',
     client_type: device.client_type,
@@ -223,6 +225,7 @@ async function submitDevice() {
     if (editingDevice.value) {
       await deviceApi.update(editingDevice.value.device_id, {
         network_code: networkCode.value,
+        ...(deviceForm.value.client_type === 'IKEV2' ? { device_name: deviceForm.value.device_name } : {}),
         ip: deviceForm.value.ip,
         ip_type: deviceForm.value.ip_type,
         ...(deviceForm.value.client_type === 'IKEV2' && deviceForm.value.ikev2_password
@@ -233,6 +236,7 @@ async function submitDevice() {
       await deviceApi.add({
         network_code: networkCode.value,
         device_id: deviceForm.value.device_id,
+        ...(deviceForm.value.client_type === 'IKEV2' ? { device_name: deviceForm.value.device_name } : {}),
         ip: deviceForm.value.ip,
         ip_type: deviceForm.value.ip_type,
         client_type: deviceForm.value.client_type,
@@ -562,6 +566,10 @@ async function executeDelete() {
             <button v-if="!editingDevice" type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" :title="deviceForm.client_type === 'IKEV2' ? '重新生成用户名' : '重新生成设备 ID'" @click="generateDeviceId"><RefreshCw :size="15" /></button>
             <button v-if="!editingDevice" type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" :title="deviceForm.client_type === 'IKEV2' ? '复制用户名' : '复制设备 ID'" @click="copyCredential(deviceForm.device_id)"><Clipboard :size="15" /></button>
           </div>
+        </div>
+        <div v-if="deviceForm.client_type === 'IKEV2'">
+          <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">设备名称</label>
+          <input v-model.trim="deviceForm.device_name" type="text" :class="inputClass" maxlength="128" required />
         </div>
         <div v-if="deviceForm.client_type === 'IKEV2'">
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">{{ editingDevice ? '重置密码' : '密码' }}</label>

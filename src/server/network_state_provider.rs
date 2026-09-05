@@ -369,6 +369,7 @@ impl NetworkState {
     pub fn upsert_device_config(
         &self,
         device_id: &str,
+        device_name: String,
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
         client_type: ClientType,
@@ -403,6 +404,7 @@ impl NetworkState {
             .map(|entry| entry.data_version)
             .unwrap_or(guard.data_version);
         if let Some(entry) = guard.device_map.get_mut(device_id) {
+            entry.device_name = device_name;
             entry.ip = Some(ip);
             entry.ip_type = ip_type;
             entry.client_type = client_type;
@@ -421,7 +423,7 @@ impl NetworkState {
                     ikev2_password,
                     allow_ikev2: false,
                     random_id: 0,
-                    device_name: device_id.to_string(),
+                    device_name,
                     device_version: String::new(),
                     is_connected: false,
                     last_connect_time: SystemTime::now(),

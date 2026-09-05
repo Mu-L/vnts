@@ -940,6 +940,7 @@ async fn delete_device(
 struct CreateDeviceRequest {
     network_code: String,
     device_id: String,
+    device_name: Option<String>,
     ip: String,
     ip_type: Option<DeviceIpType>,
     #[serde(default)]
@@ -964,6 +965,7 @@ async fn create_device(
             body.ip_type.unwrap_or(DeviceIpType::Dynamic),
             body.client_type,
             body.ikev2_password,
+            body.device_name,
         )
         .await
     {
@@ -975,6 +977,7 @@ async fn create_device(
 #[derive(Deserialize)]
 struct UpdateDeviceRequest {
     network_code: String,
+    device_name: Option<String>,
     ip: String,
     ip_type: DeviceIpType,
     ikev2_password: Option<String>,
@@ -997,6 +1000,7 @@ async fn update_device(
             ip,
             body.ip_type,
             body.ikev2_password,
+            body.device_name,
         )
         .await
     {
@@ -1405,6 +1409,7 @@ mod tests {
                 DeviceIpType::Fixed,
                 ClientType::Ikev2,
                 Some("private-password".to_string()),
+                Some("Alice's device".to_string()),
             )
             .await
             .unwrap();

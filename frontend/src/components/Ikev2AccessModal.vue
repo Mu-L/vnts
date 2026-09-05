@@ -161,7 +161,7 @@ async function downloadServerCertificate() {
         </template>
         <template v-else-if="platform === 'android'">
           <h4>Android</h4>
-          <ol><li>把下载的 CA 安装为“VPN 和应用的 CA 证书”。</li><li>新增类型为“IKEv2/IPSec MSCHAPv2”的 VPN。</li><li>服务器地址填写 <code>{{ serverAddress }}</code>。</li><li>IPSec 标识符填写用户名（设备 ID）<code>{{ info.username }}</code>。</li><li>“IPSec CA 证书”明确选择刚安装的 VNT IKEv2 CA，不要选择“不验证服务器”。</li><li>填写上方用户名和密码。</li></ol>
+          <ol><li>在设置中搜索“证书”，把下载的 CA 安装为“CA 证书”。</li><li>新增类型为“IKEv2/IPSec MSCHAPv2”的 VPN。</li><li>服务器地址填写 <code>{{ serverAddress }}</code>。</li><li>IPSec 标识符填写用户名（设备 ID）<code>{{ info.username }}</code>。</li><li>“IPSec CA 证书”明确选择刚安装的 VNT IKEv2 CA，不要选择“不验证服务器”。</li><li>填写上方用户名和密码。</li></ol>
           <p v-if="serverAddress !== remoteIdentity" class="text-amber-600 dark:text-amber-300">Android 原生客户端会以服务器地址作为远程ID；当前服务器地址与远程ID不同，可能无法通过服务器身份验证。</p>
         </template>
         <template v-else>
