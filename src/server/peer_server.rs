@@ -529,17 +529,32 @@ impl PeerServerManager {
             use crate::protocol::ip_packet_protocol::NetPacket;
             if let Ok(packet) = NetPacket::new(forward.data) {
                 let dest = Ipv4Addr::from(packet.dest_id());
-                if packet.msg_type().ok()
-                    == Some(crate::protocol::ip_packet_protocol::MsgType::Ikev2Relay)
-                {
+                if matches!(
+                    packet.msg_type().ok(),
+                    Some(crate::protocol::ip_packet_protocol::MsgType::Ikev2Relay)
+                        | Some(crate::protocol::ip_packet_protocol::MsgType::WireGuardRelay)
+                ) {
                     let Some(device) = state.get_device_entry_by_ip(dest) else {
                         return;
                     };
-                    let allowed = match device.client_type {
-                        crate::server::control_server::db::ClientType::Ikev2 => true,
-                        crate::server::control_server::db::ClientType::Vnt => {
-                            packet.is_gateway() && device.allow_ikev2
+                    let allowed = match packet.msg_type().ok() {
+                        Some(crate::protocol::ip_packet_protocol::MsgType::Ikev2Relay) => {
+                            device.client_type
+                                == crate::server::control_server::db::ClientType::Ikev2
+                                || (device.client_type
+                                    == crate::server::control_server::db::ClientType::Vnt
+                                    && packet.is_gateway()
+                                    && device.allow_ikev2)
                         }
+                        Some(crate::protocol::ip_packet_protocol::MsgType::WireGuardRelay) => {
+                            device.client_type
+                                == crate::server::control_server::db::ClientType::Wireguard
+                                || (device.client_type
+                                    == crate::server::control_server::db::ClientType::Vnt
+                                    && packet.is_gateway()
+                                    && device.allow_wireguard)
+                        }
+                        _ => false,
                     };
                     let Some(ipv4) = pnet_packet::ipv4::Ipv4Packet::new(packet.payload()) else {
                         return;
@@ -645,6 +660,9 @@ impl PeerServerManager {
                     crate::protocol::server_message::ClientType::Vnt => {
                         crate::server::control_server::db::ClientType::Vnt
                     }
+                    crate::protocol::server_message::ClientType::Wireguard => {
+                        crate::server::control_server::db::ClientType::Wireguard
+                    }
                 };
 
                 let mut advertised_subnets = client
@@ -749,48 +767,52 @@ impl PeerServerManager {
         let mut networks = Vec::new();
 
         for network_code in network_codes {
-            let clients =
-                if let Some(state) = self.network_state_provider.get_network_state(&network_code) {
-                    let clients: Vec<ClientLatencyInfo> = state
-                        .sender_map()
-                        .iter()
-                        .map(|entry| {
-                            let ip = *entry.key();
-                            let latency_ms = state
-                                .get_device_entry_by_ip(ip)
-                                .and_then(|device| device.latency_ms)
-                                .unwrap_or(DEFAULT_CLIENT_LATENCY_MS);
+            let clients = if let Some(state) =
+                self.network_state_provider.get_network_state(&network_code)
+            {
+                let clients: Vec<ClientLatencyInfo> = state
+                    .sender_map()
+                    .iter()
+                    .map(|entry| {
+                        let ip = *entry.key();
+                        let latency_ms = state
+                            .get_device_entry_by_ip(ip)
+                            .and_then(|device| device.latency_ms)
+                            .unwrap_or(DEFAULT_CLIENT_LATENCY_MS);
 
-                            ClientLatencyInfo {
-                                ip: u32::from(ip),
-                                latency_ms,
-                                advertised_subnets: state
-                                    .get_device_entry_by_ip(ip)
-                                    .filter(|device| device.subnet_advertisement_active)
-                                    .map(|device| {
-                                        device
-                                            .advertised_subnets
-                                            .into_iter()
-                                            .map(server_subnet_to_proto)
-                                            .collect()
-                                    })
-                                    .unwrap_or_default(),
-                                client_type: match state
-                                    .get_device_entry_by_ip(ip)
-                                    .map(|device| device.client_type)
-                                {
-                                    Some(crate::server::control_server::db::ClientType::Ikev2) => {
-                                        crate::protocol::server_message::ClientType::Ikev2 as i32
-                                    }
-                                    _ => crate::protocol::server_message::ClientType::Vnt as i32,
-                                },
-                            }
-                        })
-                        .collect();
-                    clients
-                } else {
-                    Vec::new()
-                };
+                        ClientLatencyInfo {
+                            ip: u32::from(ip),
+                            latency_ms,
+                            advertised_subnets: state
+                                .get_device_entry_by_ip(ip)
+                                .filter(|device| device.subnet_advertisement_active)
+                                .map(|device| {
+                                    device
+                                        .advertised_subnets
+                                        .into_iter()
+                                        .map(server_subnet_to_proto)
+                                        .collect()
+                                })
+                                .unwrap_or_default(),
+                            client_type: match state
+                                .get_device_entry_by_ip(ip)
+                                .map(|device| device.client_type)
+                            {
+                                Some(crate::server::control_server::db::ClientType::Ikev2) => {
+                                    crate::protocol::server_message::ClientType::Ikev2 as i32
+                                }
+                                Some(crate::server::control_server::db::ClientType::Wireguard) => {
+                                    crate::protocol::server_message::ClientType::Wireguard as i32
+                                }
+                                _ => crate::protocol::server_message::ClientType::Vnt as i32,
+                            },
+                        }
+                    })
+                    .collect();
+                clients
+            } else {
+                Vec::new()
+            };
             networks.push(NetworkInfo {
                 network_code,
                 clients,
@@ -1399,6 +1421,7 @@ mod tests {
                     registration_mode: RegistrationMode::Normal,
                     advertised_subnets: Vec::new(),
                     allow_ikev2: false,
+                    allow_wireguard: false,
                 },
                 1,
                 client_tx,

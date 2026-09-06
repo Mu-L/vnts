@@ -2,8 +2,9 @@ use crate::ControlService;
 use crate::server::control_server::db::{ClientType, DeviceIpType, NetworkType};
 use crate::server::control_server::service::{DeviceInfoVO, NetworkInfoVO};
 use crate::utils::config::{
-    Ikev2Config, load_ikev2_config, update_ikev2_config as persist_ikev2_config,
-    update_white_list as persist_white_list, validate_network_code,
+    Ikev2Config, WireGuardConfig, load_ikev2_config, load_wireguard_config,
+    update_ikev2_config as persist_ikev2_config, update_white_list as persist_white_list,
+    update_wireguard_config as persist_wireguard_config, validate_network_code,
 };
 use anyhow::Context;
 use axum::{
@@ -212,6 +213,221 @@ fn optional_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct WireGuardServiceInfo {
+    configured: bool,
+    enabled: bool,
+    runtime_active: bool,
+    bind: String,
+    endpoint: String,
+    persistent_keepalive: u16,
+    public_key: Option<String>,
+    runtime_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct UpdateWireGuardServiceRequest {
+    enabled: bool,
+    bind: String,
+    endpoint: String,
+    persistent_keepalive: u16,
+}
+
+fn wireguard_service_info(
+    configured: bool,
+    config: &WireGuardConfig,
+    runtime_active: bool,
+    runtime_error: Option<String>,
+) -> WireGuardServiceInfo {
+    WireGuardServiceInfo {
+        configured,
+        enabled: config.enabled,
+        runtime_active,
+        bind: config.bind.to_string(),
+        endpoint: config.endpoint.clone(),
+        persistent_keepalive: config.persistent_keepalive,
+        public_key: config
+            .private_key
+            .as_ref()
+            .and_then(|_| crate::server::wireguard::server_public_key(config).ok()),
+        runtime_error,
+    }
+}
+
+async fn get_wireguard_settings(State(state): State<AppState>) -> Response {
+    let _guard = state.config_update_lock.lock().await;
+    match load_wireguard_config(state.config_path.as_ref()) {
+        Ok(configured) => {
+            let config = configured.clone().unwrap_or_default();
+            ApiResponse::ok(wireguard_service_info(
+                configured.is_some(),
+                &config,
+                state.control_service.get_wireguard_manager().is_some(),
+                state.control_service.get_wireguard_runtime_error(),
+            ))
+            .into_response()
+        }
+        Err(error) => {
+            ApiResponse::<()>::err(format!("读取 WireGuard 配置失败: {error}")).into_response()
+        }
+    }
+}
+
+async fn update_wireguard_settings(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateWireGuardServiceRequest>,
+) -> Response {
+    let _guard = state.config_update_lock.lock().await;
+    let path = state.config_path.as_ref();
+    let previous = match load_wireguard_config(path) {
+        Ok(value) => value,
+        Err(error) => {
+            return ApiResponse::<()>::err(format!("读取 WireGuard 配置失败: {error}"))
+                .into_response();
+        }
+    };
+    let previous_text = match std::fs::read_to_string(path) {
+        Ok(value) => value,
+        Err(error) => {
+            return ApiResponse::<()>::err(format!("读取配置文件失败: {error}")).into_response();
+        }
+    };
+    let bind = match body.bind.trim().parse::<SocketAddr>() {
+        Ok(value) => value,
+        Err(_) => return ApiResponse::<()>::err("WireGuard 监听地址无效").into_response(),
+    };
+    let mut candidate = WireGuardConfig {
+        enabled: body.enabled,
+        bind,
+        endpoint: body.endpoint.trim().to_string(),
+        private_key: previous
+            .as_ref()
+            .and_then(|value| value.private_key.clone()),
+        persistent_keepalive: body.persistent_keepalive,
+    };
+    if candidate.private_key.as_deref().is_none_or(str::is_empty) {
+        candidate.private_key = Some(crate::server::wireguard::generate_private_key());
+    }
+    if let Err(error) = candidate.validate() {
+        return ApiResponse::<()>::err(error.to_string()).into_response();
+    }
+    if let Err(error) = persist_wireguard_config(path, &candidate) {
+        return ApiResponse::<()>::err(format!("保存 WireGuard 配置失败: {error}")).into_response();
+    }
+    let old_handle = state.control_service.replace_wireguard_manager(None);
+    if let Some(handle) = &old_handle {
+        handle.shutdown().await;
+    }
+    let apply_result = if candidate.enabled {
+        crate::server::wireguard::start(candidate.clone(), state.control_service.clone())
+            .await
+            .map(|handle| state.control_service.set_wireguard_manager(handle))
+    } else {
+        Ok(())
+    };
+    if let Err(error) = apply_result {
+        let _ = crate::utils::config::persist_config_text(path, previous_text);
+        if let Some(previous) = previous.filter(|value| value.enabled)
+            && let Ok(handle) =
+                crate::server::wireguard::start(previous, state.control_service.clone()).await
+        {
+            state.control_service.set_wireguard_manager(handle);
+        }
+        state
+            .control_service
+            .set_wireguard_runtime_error(Some(error.to_string()));
+        return ApiResponse::<()>::err(format!("应用 WireGuard 配置失败，已恢复旧服务: {error}"))
+            .into_response();
+    }
+    state.control_service.set_wireguard_runtime_error(None);
+    ApiResponse::ok(wireguard_service_info(
+        true,
+        &candidate,
+        state.control_service.get_wireguard_manager().is_some(),
+        None,
+    ))
+    .into_response()
+}
+
+#[derive(Serialize)]
+struct WireGuardAccessInfo {
+    service: WireGuardServiceInfo,
+    network_code: String,
+    network_net: String,
+    device_id: String,
+    private_key: String,
+    public_key: String,
+    config: String,
+}
+
+async fn get_device_wireguard_access(
+    State(state): State<AppState>,
+    Path((network_code, device_id)): Path<(String, String)>,
+) -> Response {
+    let device = match state
+        .control_service
+        .get_device_record(&network_code, &device_id)
+        .await
+    {
+        Ok(Some(device)) if device.client_type == ClientType::Wireguard => device,
+        Ok(_) => {
+            return no_store(
+                ApiResponse::<()>::err(format!("WireGuard 设备 '{device_id}' 不存在"))
+                    .into_response(),
+            );
+        }
+        Err(error) => return no_store(ApiResponse::<()>::err(error.to_string()).into_response()),
+    };
+    let Some(ip) = device.ip.as_deref() else {
+        return no_store(ApiResponse::<()>::err("WireGuard 设备未配置 IP").into_response());
+    };
+    let (Some(private_key), Some(public_key)) =
+        (device.wireguard_private_key, device.wireguard_public_key)
+    else {
+        return no_store(ApiResponse::<()>::err("WireGuard 设备未配置密钥").into_response());
+    };
+    let _guard = state.config_update_lock.lock().await;
+    let configured = match load_wireguard_config(state.config_path.as_ref()) {
+        Ok(value) => value,
+        Err(error) => return no_store(ApiResponse::<()>::err(error.to_string()).into_response()),
+    };
+    let service_config = configured.clone().unwrap_or_default();
+    let server_public_key = match crate::server::wireguard::server_public_key(&service_config) {
+        Ok(value) => value,
+        Err(error) => return no_store(ApiResponse::<()>::err(error.to_string()).into_response()),
+    };
+    let network = state
+        .control_service
+        .get_network_info()
+        .await
+        .into_iter()
+        .find(|network| network.network_code == network_code);
+    let Some(network) = network else {
+        return no_store(ApiResponse::<()>::err("网络不存在").into_response());
+    };
+    let config_text = format!(
+        "[Interface]\nPrivateKey = {private_key}\nAddress = {ip}/{}\n\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = {}\n",
+        network.netmask, network.net, service_config.endpoint, service_config.persistent_keepalive,
+    );
+    no_store(
+        ApiResponse::ok(WireGuardAccessInfo {
+            service: wireguard_service_info(
+                configured.is_some(),
+                &service_config,
+                state.control_service.get_wireguard_manager().is_some(),
+                state.control_service.get_wireguard_runtime_error(),
+            ),
+            network_code,
+            network_net: network.net.to_string(),
+            device_id,
+            private_key,
+            public_key,
+            config: config_text,
+        })
+        .into_response(),
+    )
 }
 
 fn ikev2_service_info(
@@ -1184,6 +1400,10 @@ fn build_app(app_state: AppState) -> Router {
             "/networks/{network_code}/devices/{device_id}/ikev2-access",
             get(get_device_ikev2_access),
         )
+        .route(
+            "/networks/{network_code}/devices/{device_id}/wireguard-access",
+            get(get_device_wireguard_access),
+        )
         .route("/ikev2/ca-certificate", get(download_ikev2_ca))
         .route(
             "/ikev2/server-certificate",
@@ -1203,6 +1423,10 @@ fn build_app(app_state: AppState) -> Router {
         .route(
             "/settings/ikev2",
             get(get_ikev2_settings).put(update_ikev2_settings),
+        )
+        .route(
+            "/settings/wireguard",
+            get(get_wireguard_settings).put(update_wireguard_settings),
         )
         .route_layer(middleware::from_fn_with_state(
             app_state.clone(),
@@ -1472,6 +1696,117 @@ mod tests {
         let access_body = String::from_utf8(access_body.to_vec()).unwrap();
         assert!(access_body.contains("private-password"));
         assert!(access_body.contains("\"username\":\"alice\""));
+    }
+
+    #[tokio::test]
+    async fn wireguard_access_is_device_scoped_no_store_and_private_key_is_hidden_from_list() {
+        let directory = tempfile::tempdir().unwrap();
+        let config_path = directory.path().join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"network = "10.26.0.0/24"
+lease_duration = 86400
+[wireguard]
+enabled = false
+bind = "127.0.0.1:51820"
+endpoint = "vpn.example.com:51820"
+private_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+persistent_keepalive = 25
+"#,
+        )
+        .unwrap();
+        let control_service = ControlService::new(
+            "10.26.0.0/24".parse().unwrap(),
+            HashMap::from([("alpha-wg".to_string(), "10.61.0.0/24".parse().unwrap())]),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        control_service
+            .add_device_typed(
+                "alpha-wg",
+                "wg-alice",
+                "10.61.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Wireguard,
+                None,
+                Some("Alice WG".to_string()),
+            )
+            .await
+            .unwrap();
+        let private_key = control_service
+            .get_device_record("alpha-wg", "wg-alice")
+            .await
+            .unwrap()
+            .unwrap()
+            .wireguard_private_key
+            .unwrap();
+        let jwt_secret = "wg-access-test".to_string();
+        let app = build_app(AppState {
+            control_service,
+            auth_config: AuthConfig {
+                username: "admin".into(),
+                password: "admin".into(),
+                jwt_secret: jwt_secret.clone(),
+            },
+            config_path: Arc::new(config_path),
+            config_update_lock: Arc::new(tokio::sync::Mutex::new(())),
+        });
+        let token = jsonwebtoken::encode(
+            &Header::default(),
+            &Claims {
+                sub: "admin".into(),
+                exp: (time::OffsetDateTime::now_utc() + time::Duration::minutes(5))
+                    .unix_timestamp(),
+            },
+            &EncodingKey::from_secret(jwt_secret.as_bytes()),
+        )
+        .unwrap();
+        let authorization = format!("Bearer {token}");
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/devices?code=alpha-wg")
+                    .header(header::AUTHORIZATION, &authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let list_body = String::from_utf8(
+            to_bytes(list.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!list_body.contains(&private_key));
+        let access = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/networks/alpha-wg/devices/wg-alice/wireguard-access")
+                    .header(header::AUTHORIZATION, authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            access.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body = String::from_utf8(
+            to_bytes(access.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains(&private_key));
+        assert!(body.contains("[Interface]\\nPrivateKey"));
+        assert!(body.contains("AllowedIPs = 10.61.0.0/24"));
     }
 
     #[tokio::test]

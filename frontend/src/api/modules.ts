@@ -12,6 +12,9 @@ import type {
   UpdateIkev2ServicePayload,
   UpdateNetworkPayload,
   UpdateDevicePayload,
+  DeviceWireGuardAccessInfo,
+  WireGuardServiceInfo,
+  UpdateWireGuardServicePayload,
 } from '@/types'
 
 export const authApi = {
@@ -59,6 +62,10 @@ export const deviceApi = {
     request<DeviceIkev2AccessInfo>(
       `/networks/${encodeURIComponent(code)}/devices/${encodeURIComponent(deviceId)}/ikev2-access`,
     ),
+  getWireGuardAccess: (code: string, deviceId: string) =>
+    request<DeviceWireGuardAccessInfo>(
+      `/networks/${encodeURIComponent(code)}/devices/${encodeURIComponent(deviceId)}/wireguard-access`,
+    ),
 }
 
 export const peerServerApi = {
@@ -80,6 +87,12 @@ export const settingsApi = {
   getIkev2: () => request<Ikev2ServiceInfo>('/settings/ikev2'),
   updateIkev2: (payload: UpdateIkev2ServicePayload) =>
     request<Ikev2ServiceInfo>('/settings/ikev2', {
+      method: 'PUT',
+      body: payload,
+    }),
+  getWireGuard: () => request<WireGuardServiceInfo>('/settings/wireguard'),
+  updateWireGuard: (payload: UpdateWireGuardServicePayload) =>
+    request<WireGuardServiceInfo>('/settings/wireguard', {
       method: 'PUT',
       body: payload,
     }),

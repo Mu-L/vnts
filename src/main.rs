@@ -47,6 +47,13 @@ async fn main() -> anyhow::Result<()> {
             utils::config::update_ikev2_config(&config_path, ikev2)?;
         }
     }
+    if let Some(wireguard) = conf.wireguard.as_mut()
+        && wireguard.enabled
+        && wireguard.private_key.as_deref().is_none_or(str::is_empty)
+    {
+        wireguard.private_key = Some(server::wireguard::generate_private_key());
+        utils::config::update_wireguard_config(&config_path, wireguard)?;
+    }
     if conf.persistence {
         server::control_server::db::init_db_pool().await?;
     }
@@ -73,6 +80,7 @@ async fn main() -> anyhow::Result<()> {
 
     let web_bind = conf.web_bind;
     let ikev2_config = conf.ikev2.clone();
+    let wireguard_config = conf.wireguard.clone();
     let username = conf.username.unwrap_or("admin".to_string());
     let password = conf.password.unwrap_or("admin".to_string());
 
@@ -93,6 +101,11 @@ async fn main() -> anyhow::Result<()> {
     if let Some(ikev2_config) = ikev2_config.filter(|config| config.enabled) {
         let ikev2 = server::ikev2::start(ikev2_config, control_service.clone()).await?;
         control_service.set_ikev2_manager(ikev2);
+    }
+
+    if let Some(wireguard_config) = wireguard_config.filter(|config| config.enabled) {
+        let wireguard = server::wireguard::start(wireguard_config, control_service.clone()).await?;
+        control_service.set_wireguard_manager(wireguard);
     }
 
     if let Some(web_bind) = web_bind {

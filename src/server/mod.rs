@@ -2,6 +2,7 @@ pub mod control_server;
 pub mod ikev2;
 pub mod network_state_provider;
 pub mod peer_server;
+pub mod wireguard;
 
 // 传输层
 pub mod quic;

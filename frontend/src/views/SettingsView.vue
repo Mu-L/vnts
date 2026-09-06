@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { Radio, ShieldCheck } from '@lucide/vue'
+import { Radio, ShieldCheck, Waves } from '@lucide/vue'
 import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import Ikev2ServiceSettings from '@/components/Ikev2ServiceSettings.vue'
 import NetworkAccessSettings from '@/components/NetworkAccessSettings.vue'
+import WireGuardServiceSettings from '@/components/WireGuardServiceSettings.vue'
 import { useSettingsNavigation } from '@/composables/useSettingsNavigation'
 import type { SettingsSectionId } from '@/composables/useSettingsNavigation'
 
@@ -14,9 +15,10 @@ const { sectionStates, hasUnsavedChanges, updateSectionState } = useSettingsNavi
 const sections = [
   { id: 'access-control' as const, label: '访问控制', description: '网络编码白名单', icon: ShieldCheck },
   { id: 'ikev2' as const, label: 'IKEv2 服务', description: '连接、端口与证书', icon: Radio },
+  { id: 'wireguard' as const, label: 'WireGuard', description: 'UDP 接入与密钥', icon: Waves },
 ]
 
-const activeSection = computed<SettingsSectionId>(() => route.query.section === 'ikev2' ? 'ikev2' : 'access-control')
+const activeSection = computed<SettingsSectionId>(() => route.query.section === 'ikev2' || route.query.section === 'wireguard' ? route.query.section : 'access-control')
 
 function selectSection(section: SettingsSectionId) {
   if (section === activeSection.value) return
@@ -36,7 +38,7 @@ function handleBeforeUnload(event: BeforeUnloadEvent) {
 watch(
   () => route.query.section,
   (value) => {
-    if (value === 'access-control' || value === 'ikev2') return
+    if (value === 'access-control' || value === 'ikev2' || value === 'wireguard') return
     void router.replace({ query: { ...route.query, section: 'access-control' } })
   },
   { immediate: true },
@@ -49,7 +51,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
 
 <template>
   <div class="mx-auto max-w-5xl">
-    <div class="mb-4 grid grid-cols-2 gap-2 lg:hidden" role="tablist" aria-label="设置分区">
+    <div class="mb-4 grid grid-cols-3 gap-2 lg:hidden" role="tablist" aria-label="设置分区">
       <button
         v-for="section in sections"
         :key="section.id"
@@ -71,6 +73,7 @@ onBeforeUnmount(() => window.removeEventListener('beforeunload', handleBeforeUnl
     <main class="min-w-0">
       <NetworkAccessSettings v-show="activeSection === 'access-control'" @state="updateSectionState('access-control', $event)" />
       <Ikev2ServiceSettings v-show="activeSection === 'ikev2'" @state="updateSectionState('ikev2', $event)" />
+      <WireGuardServiceSettings v-show="activeSection === 'wireguard'" @state="updateSectionState('wireguard', $event)" />
     </main>
   </div>
 </template>

@@ -219,12 +219,14 @@ impl ControlHandler {
                     return Ok(());
                 }
                 let data_version = u64::from_be_bytes(packet.payload()[8..].try_into()?);
-                if session.allow_ikev2
+                if (session.allow_ikev2 || session.allow_wireguard)
                     && let Some(peer_manager) = self.control_service.get_peer_manager()
                 {
-                    let mut list = session
-                        .network_state
-                        .full_client_simple_list(session.ip, true);
+                    let mut list = session.network_state.full_client_simple_list(
+                        session.ip,
+                        session.allow_ikev2,
+                        session.allow_wireguard,
+                    );
                     let mut seen = list
                         .list
                         .iter()
@@ -233,16 +235,24 @@ impl ControlHandler {
                     for (ip, _, _, _, client_type) in
                         peer_manager.get_remote_devices(&session.network_code)
                     {
-                        if client_type == crate::server::control_server::db::ClientType::Ikev2
+                        if ((client_type == crate::server::control_server::db::ClientType::Ikev2
+                            && session.allow_ikev2)
+                            || (client_type
+                                == crate::server::control_server::db::ClientType::Wireguard
+                                && session.allow_wireguard))
                             && seen.insert(ip)
                         {
                             list.list
                                 .push(crate::protocol::control_message::ClientSimpleInfo {
-                                    ip,
-                                    online: true,
-                                    client_type:
-                                        crate::protocol::control_message::ClientType::Ikev2,
-                                });
+                                ip,
+                                online: true,
+                                client_type: match client_type {
+                                    crate::server::control_server::db::ClientType::Wireguard => {
+                                        crate::protocol::control_message::ClientType::Wireguard
+                                    }
+                                    _ => crate::protocol::control_message::ClientType::Ikev2,
+                                },
+                            });
                         }
                     }
                     list.time = i64::from_be_bytes(packet.payload()[..8].try_into()?);
@@ -255,6 +265,7 @@ impl ControlHandler {
                     session.ip,
                     data_version,
                     session.allow_ikev2,
+                    session.allow_wireguard,
                 ) {
                     list.time = i64::from_be_bytes(packet.payload()[..8].try_into()?);
                     if let Some(buf) = Self::push_client_ips(list) {
@@ -348,6 +359,45 @@ impl ControlHandler {
                         .control_service
                         .client_type(&session.network_code, dest)
                         != Some(crate::server::control_server::db::ClientType::Ikev2)
+                {
+                    return Ok(());
+                }
+                let Some(ipv4) = Ipv4Packet::new(packet.payload()) else {
+                    return Ok(());
+                };
+                let header_length = ipv4.get_header_length() as usize * 4;
+                if ipv4.get_version() != 4
+                    || header_length < Ipv4Packet::minimum_packet_size()
+                    || ipv4.get_total_length() as usize != packet.payload().len()
+                    || ipv4.get_source() != src
+                    || ipv4.get_destination() != dest
+                {
+                    return Ok(());
+                }
+                if !packet.decr_ttl() {
+                    return Ok(());
+                }
+                let data = buf.freeze();
+                let forwarded = if let Some(peer_manager) = self.control_service.get_peer_manager()
+                {
+                    peer_manager
+                        .forward_with_best_route(&session.network_code, dest, data.clone())
+                        .await
+                } else {
+                    false
+                };
+                if !forwarded && let Some(sender) = session.network_state.sender_map().get(&dest) {
+                    session.network_state.record_rx_traffic(dest, data.len());
+                    _ = sender.try_send(data);
+                }
+            }
+            MsgType::WireGuardRelay => {
+                if !session.allow_wireguard
+                    || src != session.ip
+                    || self
+                        .control_service
+                        .client_type(&session.network_code, dest)
+                        != Some(crate::server::control_server::db::ClientType::Wireguard)
                 {
                     return Ok(());
                 }
@@ -488,7 +538,11 @@ impl ControlHandler {
         let Some(RpcReqPayload::ClientListReq(_)) = req.rpc_req_payload else {
             return Ok(());
         };
-        let list = session.network_state.client_info_list(session.ip);
+        let list = session.network_state.client_info_list(
+            session.ip,
+            session.allow_ikev2,
+            session.allow_wireguard,
+        );
         let response = RpcMessageResponse {
             id: req.id,
             rpc_res_payload: Some(RpcResPayload::ClientListRes(ClientListResponse { list })),

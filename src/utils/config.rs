@@ -1,3 +1,4 @@
+use base64::Engine;
 use ipnet::Ipv4Net;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -29,6 +30,34 @@ pub struct ConfigFile {
     pub peer_servers: Vec<String>,
     pub server_token: Option<String>,
     pub ikev2: Option<Ikev2Config>,
+    pub wireguard: Option<WireGuardConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WireGuardConfig {
+    pub enabled: bool,
+    pub bind: SocketAddr,
+    #[serde(default)]
+    pub endpoint: String,
+    pub private_key: Option<String>,
+    #[serde(default = "default_wireguard_keepalive")]
+    pub persistent_keepalive: u16,
+}
+
+const fn default_wireguard_keepalive() -> u16 {
+    25
+}
+
+impl Default for WireGuardConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind: "0.0.0.0:51820".parse().unwrap(),
+            endpoint: String::new(),
+            private_key: None,
+            persistent_keepalive: default_wireguard_keepalive(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -79,6 +108,7 @@ impl Default for ConfigFile {
             peer_servers: vec![],
             server_token: None,
             ikev2: None,
+            wireguard: None,
         }
     }
 }
@@ -117,8 +147,52 @@ impl ConfigFile {
         if let Some(ikev2) = &self.ikev2 {
             ikev2.validate()?;
         }
+        if let Some(wireguard) = &self.wireguard {
+            wireguard.validate()?;
+        }
         Ok(())
     }
+}
+
+impl WireGuardConfig {
+    pub(crate) fn validate(&self) -> anyhow::Result<()> {
+        if self.enabled {
+            validate_wireguard_endpoint(&self.endpoint)?;
+        }
+        if let Some(private_key) = &self.private_key
+            && !private_key.is_empty()
+        {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(private_key)
+                .map_err(|_| anyhow::anyhow!("wireguard.private_key must be valid base64"))?;
+            if decoded.len() != 32 {
+                anyhow::bail!("wireguard.private_key must decode to 32 bytes");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn validate_wireguard_endpoint(endpoint: &str) -> anyhow::Result<()> {
+    if endpoint.trim().is_empty() || endpoint.trim() != endpoint {
+        anyhow::bail!("wireguard.endpoint cannot be empty or contain surrounding whitespace");
+    }
+    if let Ok(address) = endpoint.parse::<SocketAddr>() {
+        if address.port() == 0 {
+            anyhow::bail!("wireguard.endpoint port cannot be zero");
+        }
+        return Ok(());
+    }
+    let (host, port) = endpoint
+        .rsplit_once(':')
+        .ok_or_else(|| anyhow::anyhow!("wireguard.endpoint must use host:port syntax"))?;
+    let port = port
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("wireguard.endpoint has an invalid port"))?;
+    if port == 0 || host.is_empty() || host.starts_with('[') || host.ends_with(']') {
+        anyhow::bail!("wireguard.endpoint is invalid");
+    }
+    validate_ikev2_host(host, "wireguard.endpoint host")
 }
 
 impl Ikev2Config {
@@ -228,6 +302,46 @@ pub fn update_white_list(path: &Path, network_codes: &[String]) -> anyhow::Resul
 
 pub fn load_ikev2_config(path: &Path) -> anyhow::Result<Option<Ikev2Config>> {
     Ok(ConfigFile::load_from(Some(path.to_path_buf()))?.ikev2)
+}
+
+pub fn load_wireguard_config(path: &Path) -> anyhow::Result<Option<WireGuardConfig>> {
+    Ok(ConfigFile::load_from(Some(path.to_path_buf()))?.wireguard)
+}
+
+pub fn update_wireguard_config(
+    path: &Path,
+    config: &WireGuardConfig,
+) -> anyhow::Result<WireGuardConfig> {
+    config.validate()?;
+    let content = std::fs::read_to_string(path)?;
+    let mut document = content.parse::<DocumentMut>()?;
+    if !document.contains_key("wireguard") {
+        document["wireguard"] = Item::Table(Table::new());
+    }
+    let table = document["wireguard"]
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("wireguard 必须是表"))?;
+    insert_value(table, "enabled", Value::from(config.enabled));
+    insert_value(table, "bind", Value::from(config.bind.to_string()));
+    insert_value(table, "endpoint", Value::from(config.endpoint.clone()));
+    match &config.private_key {
+        Some(private_key) => insert_value(table, "private_key", Value::from(private_key.clone())),
+        None => {
+            table.remove("private_key");
+        }
+    }
+    insert_value(
+        table,
+        "persistent_keepalive",
+        Value::from(i64::from(config.persistent_keepalive)),
+    );
+    let rendered = document.to_string();
+    let parsed: ConfigFile = toml::from_str(&rendered)?;
+    let wireguard = parsed
+        .wireguard
+        .ok_or_else(|| anyhow::anyhow!("WireGuard 服务尚未配置"))?;
+    persist_document(path, rendered)?;
+    Ok(wireguard)
 }
 
 pub fn update_ikev2_config(path: &Path, config: &Ikev2Config) -> anyhow::Result<Ikev2Config> {
@@ -373,6 +487,14 @@ key = "key.pem"
 # key = "ikev2-key.pem"
 # dns = []
 #
+# WireGuard 接入（可选；使用独立 UDP 监听端口）
+# [wireguard]
+# enabled = true
+# bind = "0.0.0.0:51820"
+# endpoint = "vpn.example.com:51820"
+# private_key = "" # 留空时首次启用自动生成
+# persistent_keepalive = 25
+#
 # 自定义虚拟网段 格式：网络编号 = "网段"
 [custom_nets]
 
@@ -385,8 +507,8 @@ key = "key.pem"
 #[cfg(test)]
 mod tests {
     use super::{
-        ConfigFile, Ikev2Config, load_ikev2_config, update_ikev2_config, update_white_list,
-        validate_network_code,
+        ConfigFile, Ikev2Config, load_ikev2_config, load_wireguard_config, update_ikev2_config,
+        update_white_list, update_wireguard_config, validate_network_code,
     };
     use std::collections::HashSet;
 
@@ -546,5 +668,60 @@ future_global_option = "keep"
         let updated = load_ikev2_config(&path).unwrap().unwrap();
         assert_eq!(updated.server_address, "vpn-access.example.com");
         assert_eq!(updated.remote_id, "vpn.example.com");
+    }
+
+    #[test]
+    fn wireguard_config_validates_endpoint_and_key() {
+        let config: ConfigFile = toml::from_str(
+            r#"network = "10.26.0.0/24"
+lease_duration = 86400
+[wireguard]
+enabled = true
+bind = "0.0.0.0:51820"
+endpoint = "vpn.example.com:51820"
+private_key = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+persistent_keepalive = 25
+"#,
+        )
+        .unwrap();
+        assert!(config.validate().is_ok());
+
+        let mut invalid = config.wireguard.unwrap();
+        invalid.endpoint = "vpn.example.com".to_string();
+        assert!(invalid.validate().is_err());
+        invalid.endpoint = "vpn.example.com:51820".to_string();
+        invalid.private_key = Some("not-a-key".to_string());
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn updating_wireguard_preserves_comments_and_other_sections() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"# root comment
+network = "10.26.0.0/24"
+lease_duration = 86400
+[wireguard]
+enabled = false
+bind = "0.0.0.0:51820" # bind comment
+endpoint = ""
+persistent_keepalive = 25
+future_option = "keep"
+[custom_nets]
+alpha = "10.27.0.0/24"
+"#,
+        )
+        .unwrap();
+        let mut config = load_wireguard_config(&path).unwrap().unwrap();
+        config.endpoint = "vpn.example.com:51820".to_string();
+        config.private_key = Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string());
+        update_wireguard_config(&path, &config).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("# root comment"));
+        assert!(content.contains("# bind comment"));
+        assert!(content.contains("future_option = \"keep\""));
+        assert!(content.contains("alpha = \"10.27.0.0/24\""));
     }
 }

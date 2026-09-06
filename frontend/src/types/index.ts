@@ -11,7 +11,7 @@ export interface LoginResult {
 export type NetworkSource = 'Config' | 'Manual' | 'DeviceRegister' | string
 export type NetworkType = 'Public' | 'Private'
 export type DeviceIpType = 'Dynamic' | 'Static' | 'Fixed'
-export type ClientType = 'VNT' | 'IKEV2'
+export type ClientType = 'VNT' | 'IKEV2' | 'WIREGUARD'
 
 export interface NetworkInfo {
   network_code: string
@@ -129,6 +129,34 @@ export interface UpdateIkev2ServicePayload {
   dns: string[]
   cert?: string
   key?: string
+}
+
+export interface WireGuardServiceInfo {
+  configured: boolean
+  enabled: boolean
+  runtime_active: boolean
+  bind: string
+  endpoint: string
+  persistent_keepalive: number
+  public_key: string | null
+  runtime_error: string | null
+}
+
+export interface UpdateWireGuardServicePayload {
+  enabled: boolean
+  bind: string
+  endpoint: string
+  persistent_keepalive: number
+}
+
+export interface DeviceWireGuardAccessInfo {
+  service: WireGuardServiceInfo
+  network_code: string
+  network_net: string
+  device_id: string
+  private_key: string
+  public_key: string
+  config: string
 }
 
 export interface NetworkWhitelistSettings {

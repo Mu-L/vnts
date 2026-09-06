@@ -984,7 +984,15 @@ impl Engine {
             let destination = Ipv4Addr::from(packet.dest_id());
             let (inner_source, inner_destination, total_length) =
                 checked_ipv4(packet.payload()).context("invalid relay IPv4 packet")?;
-            if destination != established.session.ip
+            let network_broadcast = ipnet::Ipv4Net::new(
+                established.session.network_state.gateway(),
+                established.session.network_state.net_prefix_len(),
+            )?
+            .trunc()
+            .broadcast();
+            if (destination != established.session.ip
+                && destination != network_broadcast
+                && !destination.is_broadcast())
                 || inner_source != source
                 || inner_destination != destination
             {

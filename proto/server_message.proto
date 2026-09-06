@@ -5,6 +5,7 @@ package protocol.server_message;
 enum ClientType {
   VNT = 0;
   IKEV2 = 1;
+  WIREGUARD = 2;
 }
 
 

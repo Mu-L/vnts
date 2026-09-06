@@ -22,6 +22,7 @@ import { deviceApi, networkApi } from '@/api/modules'
 import ConfirmDialog from '@/components/ConfirmDialog.vue'
 import BaseModal from '@/components/BaseModal.vue'
 import Ikev2AccessModal from '@/components/Ikev2AccessModal.vue'
+import WireGuardAccessModal from '@/components/WireGuardAccessModal.vue'
 import LatencyBadge from '@/components/LatencyBadge.vue'
 import SpeedChart from '@/components/SpeedChart.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
@@ -153,7 +154,7 @@ function randomValue(length: number, alphabet: string) {
 }
 
 function generateDeviceId() {
-  const prefix = deviceForm.value.client_type === 'IKEV2' ? 'ikev2' : 'vnt'
+  const prefix = deviceForm.value.client_type === 'IKEV2' ? 'ikev2' : deviceForm.value.client_type === 'WIREGUARD' ? 'wg' : 'vnt'
   deviceForm.value.device_id = `${prefix}-${randomValue(12, '0123456789abcdef')}`
 }
 
@@ -225,7 +226,7 @@ async function submitDevice() {
     if (editingDevice.value) {
       await deviceApi.update(editingDevice.value.device_id, {
         network_code: networkCode.value,
-        ...(deviceForm.value.client_type === 'IKEV2' ? { device_name: deviceForm.value.device_name } : {}),
+        ...(deviceForm.value.client_type !== 'VNT' ? { device_name: deviceForm.value.device_name } : {}),
         ip: deviceForm.value.ip,
         ip_type: deviceForm.value.ip_type,
         ...(deviceForm.value.client_type === 'IKEV2' && deviceForm.value.ikev2_password
@@ -236,7 +237,7 @@ async function submitDevice() {
       await deviceApi.add({
         network_code: networkCode.value,
         device_id: deviceForm.value.device_id,
-        ...(deviceForm.value.client_type === 'IKEV2' ? { device_name: deviceForm.value.device_name } : {}),
+        ...(deviceForm.value.client_type !== 'VNT' ? { device_name: deviceForm.value.device_name } : {}),
         ip: deviceForm.value.ip,
         ip_type: deviceForm.value.ip_type,
         client_type: deviceForm.value.client_type,
@@ -256,10 +257,16 @@ async function submitDevice() {
 }
 
 const accessDevice = ref<DeviceInfo | null>(null)
+const wireGuardAccessDevice = ref<DeviceInfo | null>(null)
 
 function openIkev2Access(group: DeviceGroup) {
   const device = localDevice(group)
   if (device?.client_type === 'IKEV2') accessDevice.value = device
+}
+
+function openWireGuardAccess(group: DeviceGroup) {
+  const device = localDevice(group)
+  if (device?.client_type === 'WIREGUARD') wireGuardAccessDevice.value = device
 }
 
 // ---------- 删除设备 ----------
@@ -378,8 +385,7 @@ async function executeDelete() {
                 <div class="flex items-center gap-2 font-medium text-slate-900 dark:text-slate-100">
                   <span>{{ group.devices[0]?.device_name }}</span>
                   <span
-                    class="rounded px-1.5 py-0.5 text-[10px] font-semibold"
-                    :class="group.devices[0]?.client_type === 'IKEV2' ? 'bg-cyan-50 text-cyan-700 dark:bg-cyan-500/10 dark:text-cyan-300' : 'bg-slate-100 text-slate-500 dark:bg-slate-700 dark:text-slate-300'"
+                    class="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-500 dark:bg-slate-700 dark:text-slate-300"
                   >{{ group.devices[0]?.client_type || 'VNT' }}</span>
                 </div>
                 <div class="font-mono text-xs text-slate-400 dark:text-slate-500">{{ group.devices[0]?.device_id }}</div>
@@ -455,6 +461,14 @@ async function executeDelete() {
                     class="flex h-7 w-7 items-center justify-center rounded-lg text-cyan-500 transition hover:bg-cyan-50 hover:text-cyan-700 dark:hover:bg-cyan-500/10 dark:hover:text-cyan-300"
                     title="IKEv2 接入说明"
                     @click="openIkev2Access(group)"
+                  >
+                    <KeyRound :size="15" />
+                  </button>
+                  <button
+                    v-if="localDevice(group)?.client_type === 'WIREGUARD'"
+                    class="flex h-7 w-7 items-center justify-center rounded-lg text-slate-400 hover:bg-blue-50 hover:text-blue-600 dark:hover:bg-blue-500/10 dark:hover:text-blue-400"
+                    title="WireGuard 接入配置"
+                    @click="openWireGuardAccess(group)"
                   >
                     <KeyRound :size="15" />
                   </button>
@@ -556,6 +570,7 @@ async function executeDelete() {
           <select v-model="deviceForm.client_type" :class="inputClass" :disabled="Boolean(editingDevice)" @change="changeClientType">
             <option value="VNT">VNT</option>
             <option value="IKEV2">IKEv2</option>
+            <option value="WIREGUARD">WireGuard</option>
           </select>
           <p v-if="editingDevice" class="mt-1.5 text-xs text-slate-400">设备创建后不能修改类型。</p>
         </div>
@@ -567,7 +582,7 @@ async function executeDelete() {
             <button v-if="!editingDevice" type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" :title="deviceForm.client_type === 'IKEV2' ? '复制用户名' : '复制设备 ID'" @click="copyCredential(deviceForm.device_id)"><Clipboard :size="15" /></button>
           </div>
         </div>
-        <div v-if="deviceForm.client_type === 'IKEV2'">
+        <div v-if="deviceForm.client_type !== 'VNT'">
           <label class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">设备名称</label>
           <input v-model.trim="deviceForm.device_name" type="text" :class="inputClass" maxlength="128" required />
         </div>
@@ -620,6 +635,12 @@ async function executeDelete() {
       :network-code="networkCode"
       :device-id="accessDevice?.device_id ?? ''"
       @close="accessDevice = null"
+    />
+    <WireGuardAccessModal
+      :open="Boolean(wireGuardAccessDevice)"
+      :network-code="networkCode"
+      :device-id="wireGuardAccessDevice?.device_id ?? ''"
+      @close="wireGuardAccessDevice = null"
     />
 
     <!-- 删除确认 -->

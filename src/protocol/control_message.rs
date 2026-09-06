@@ -29,6 +29,7 @@ pub struct RegRequestMsg {
     pub registration_mode: RegistrationMode,
     pub advertised_subnets: Vec<Ipv4Net>,
     pub allow_ikev2: bool,
+    pub allow_wireguard: bool,
 }
 impl RegRequestMsg {
     pub const MAX_NETWORK_CODE_LEN: usize = 32;
@@ -96,6 +97,7 @@ impl RegRequestMsg {
             registration_mode,
             advertised_subnets,
             allow_ikev2: msg.allow_ikev2,
+            allow_wireguard: msg.allow_wireguard,
         })
     }
     pub fn to(self) -> proto::RegRequestMsg {
@@ -115,6 +117,7 @@ impl RegRequestMsg {
                 .map(ipv4_subnet_to_proto)
                 .collect(),
             allow_ikev2: self.allow_ikev2,
+            allow_wireguard: self.allow_wireguard,
         }
     }
 }

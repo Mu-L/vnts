@@ -7,6 +7,7 @@ use crate::server::network_state_provider::{
     NetworkState, NetworkStateProvider, i64_to_system_time,
 };
 use anyhow::{Context, bail};
+use base64::Engine;
 use bytes::Bytes;
 use bytes::BytesMut;
 use dashmap::DashMap;
@@ -88,9 +89,12 @@ pub struct ControlService {
     network_init_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     device_mutation_locks: Arc<DashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     ikev2_device_mutation_lock: Arc<tokio::sync::Mutex<()>>,
+    wireguard_device_mutation_lock: Arc<tokio::sync::Mutex<()>>,
     peer_manager: Arc<RwLock<Option<Arc<crate::server::peer_server::PeerServerManager>>>>,
     ikev2_manager: Arc<RwLock<Option<crate::server::ikev2::Ikev2Handle>>>,
     ikev2_runtime_error: Arc<RwLock<Option<String>>>,
+    wireguard_manager: Arc<RwLock<Option<crate::server::wireguard::WireGuardHandle>>>,
+    wireguard_runtime_error: Arc<RwLock<Option<String>>>,
 }
 
 impl ControlService {
@@ -118,9 +122,12 @@ impl ControlService {
             network_init_locks: Arc::new(DashMap::new()),
             device_mutation_locks: Arc::new(DashMap::new()),
             ikev2_device_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            wireguard_device_mutation_lock: Arc::new(tokio::sync::Mutex::new(())),
             peer_manager: Arc::new(RwLock::new(None)),
             ikev2_manager: Arc::new(RwLock::new(None)),
             ikev2_runtime_error: Arc::new(RwLock::new(None)),
+            wireguard_manager: Arc::new(RwLock::new(None)),
+            wireguard_runtime_error: Arc::new(RwLock::new(None)),
         };
 
         let cleanup_interval = Duration::from_secs(30 * 60);
@@ -256,6 +263,7 @@ impl ControlService {
         let network_code = reg_req.network_code.clone();
         let registration_mode = reg_req.registration_mode;
         let allow_ikev2 = reg_req.allow_ikev2;
+        let allow_wireguard = reg_req.allow_wireguard;
         if !self.network_code_allowed(&network_code) {
             bail!("network_code '{}' is not in white_list", network_code);
         }
@@ -287,8 +295,8 @@ impl ControlService {
         {
             bail!("设备 ID '{}' 已被其他设备类型占用", reg_req.device_id);
         }
-        if client_type == ClientType::Ikev2 && existing.is_none() {
-            bail!("IKEv2 设备 '{}' 未由管理员预先创建", reg_req.device_id);
+        if client_type != ClientType::Vnt && existing.is_none() {
+            bail!("外部接入设备 '{}' 未由管理员预先创建", reg_req.device_id);
         }
 
         if config.network_type == NetworkType::Private
@@ -323,6 +331,7 @@ impl ControlService {
                         RegistrationMode::PreRegister => RegistrationStatus::PendingConfirmation,
                     },
                     allow_ikev2,
+                    allow_wireguard,
                 },
                 entry,
             )
@@ -396,8 +405,49 @@ impl ControlService {
             registration_mode: RegistrationMode::Normal,
             advertised_subnets: Vec::new(),
             allow_ikev2: true,
+            allow_wireguard: true,
         };
         self.register_inner(request, sender, ClientType::Ikev2)
+            .await
+    }
+
+    pub async fn register_wireguard(
+        &self,
+        network_code: String,
+        device_id: String,
+        sender: Sender<Bytes>,
+    ) -> anyhow::Result<Session> {
+        let config = self.network_config(&network_code, None)?;
+        let state = self
+            .get_or_create_network_state(network_code.clone(), config)
+            .await;
+        let entry = state
+            .get_device_entry(&device_id)
+            .filter(|entry| entry.client_type == ClientType::Wireguard)
+            .with_context(|| format!("WireGuard 设备 '{}' 未由管理员预先创建", device_id))?;
+        let remote_ips = self
+            .get_peer_manager()
+            .map(|manager| manager.remote_online_ips(&network_code))
+            .unwrap_or_default();
+        let requested_ip = entry
+            .ip
+            .filter(|ip| !remote_ips.contains(ip))
+            .context("WireGuard 设备没有可用的固定地址")?;
+        let request = RegRequestMsg {
+            network_code: network_code.clone(),
+            device_id,
+            ip: Some(requested_ip),
+            name: entry.device_name,
+            version: "WireGuard".to_string(),
+            key_sign: None,
+            ip_variable: false,
+            server_id: 0,
+            registration_mode: RegistrationMode::Normal,
+            advertised_subnets: Vec::new(),
+            allow_ikev2: true,
+            allow_wireguard: true,
+        };
+        self.register_inner(request, sender, ClientType::Wireguard)
             .await
     }
 
@@ -570,7 +620,7 @@ impl ControlService {
                     let ip = *entry.key();
                     if state
                         .get_device_entry_by_ip(ip)
-                        .is_some_and(|device| device.client_type == ClientType::Ikev2)
+                        .is_some_and(|device| device.client_type != ClientType::Vnt)
                     {
                         continue;
                     }
@@ -750,6 +800,7 @@ impl ControlService {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn upsert_device(
         &self,
         network_code: &str,
@@ -767,6 +818,7 @@ impl ControlService {
             bail!("无效的设备 ID");
         }
         let _ikev2_guard = self.ikev2_device_mutation_lock.lock().await;
+        let _wireguard_guard = self.wireguard_device_mutation_lock.lock().await;
         let mutation_lock = self
             .device_mutation_locks
             .entry(network_code.to_string())
@@ -829,13 +881,42 @@ impl ControlService {
                 }
                 password
             }
+            ClientType::Wireguard => {
+                if ikev2_password.is_some() {
+                    bail!("WireGuard 设备不能配置 IKEv2 密码");
+                }
+                None
+            }
+        };
+        let (wireguard_private_key, wireguard_public_key) = if client_type == ClientType::Wireguard
+        {
+            match existing.as_ref().and_then(|entry| {
+                Some((
+                    entry.wireguard_private_key.clone()?,
+                    entry.wireguard_public_key.clone()?,
+                ))
+            }) {
+                Some(keys) => (Some(keys.0), Some(keys.1)),
+                None => {
+                    let mut bytes = [0u8; 32];
+                    rand::rng().fill_bytes(&mut bytes);
+                    let secret = boringtun::x25519::StaticSecret::from(bytes);
+                    let public = boringtun::x25519::PublicKey::from(&secret);
+                    (
+                        Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
+                        Some(base64::engine::general_purpose::STANDARD.encode(public.as_bytes())),
+                    )
+                }
+            }
+        } else {
+            (None, None)
         };
         let device_name = match client_type {
             ClientType::Vnt => existing
                 .as_ref()
                 .map(|entry| entry.device_name.clone())
                 .unwrap_or_else(|| device_id.to_string()),
-            ClientType::Ikev2 => device_name
+            ClientType::Ikev2 | ClientType::Wireguard => device_name
                 .or_else(|| existing.as_ref().map(|entry| entry.device_name.clone()))
                 .unwrap_or_else(|| device_id.to_string()),
         };
@@ -854,6 +935,14 @@ impl ControlService {
         {
             manager.disconnect_device(network_code, device_id).await;
         }
+        if matches!(mutation, DeviceMutation::Update)
+            && existing
+                .as_ref()
+                .is_some_and(|entry| entry.client_type == ClientType::Wireguard)
+            && let Some(manager) = self.get_wireguard_manager()
+        {
+            manager.disconnect_device(network_code, device_id).await;
+        }
 
         let previous = state.upsert_device_config(
             device_id,
@@ -862,6 +951,8 @@ impl ControlService {
             ip_type,
             client_type,
             password,
+            wireguard_private_key,
+            wireguard_public_key,
         )?;
         let record = state
             .get_device_entry(device_id)
@@ -874,9 +965,13 @@ impl ControlService {
         if client_type == ClientType::Ikev2 {
             self.refresh_ikev2_credentials().await;
         }
+        if client_type == ClientType::Wireguard {
+            self.refresh_wireguard_peers().await;
+        }
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn add_device_typed(
         &self,
         network_code: &str,
@@ -1002,6 +1097,46 @@ impl ControlService {
         }
     }
 
+    pub async fn wireguard_devices(&self) -> anyhow::Result<Vec<db::DeviceRecord>> {
+        let mut devices = db::load_all_wireguard_devices()
+            .await?
+            .into_iter()
+            .map(|device| {
+                (
+                    (device.network_code.clone(), device.device_id.clone()),
+                    device,
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for state in self.network_state_provider.iter() {
+            for device in state.device_records_by_type(ClientType::Wireguard) {
+                devices.insert(
+                    (device.network_code.clone(), device.device_id.clone()),
+                    device,
+                );
+            }
+        }
+        Ok(devices.into_values().collect())
+    }
+
+    async fn refresh_wireguard_peers(&self) {
+        let Some(manager) = self.get_wireguard_manager() else {
+            return;
+        };
+        match self.wireguard_devices().await {
+            Ok(devices) => {
+                if let Err(error) = manager.reload_devices(devices).await {
+                    log::error!("刷新 WireGuard 设备失败: {error:#}");
+                    self.set_wireguard_runtime_error(Some(error.to_string()));
+                }
+            }
+            Err(error) => {
+                log::error!("读取 WireGuard 设备失败: {error:#}");
+                self.set_wireguard_runtime_error(Some(error.to_string()));
+            }
+        }
+    }
+
     pub async fn get_device_record(
         &self,
         network_code: &str,
@@ -1038,11 +1173,19 @@ impl ControlService {
 
     pub async fn delete_device(&self, network_code: &str, device_id: &str) -> anyhow::Result<()> {
         let _ikev2_guard = self.ikev2_device_mutation_lock.lock().await;
-        let was_ikev2 = self
+        let _wireguard_guard = self.wireguard_device_mutation_lock.lock().await;
+        let client_type = self
             .get_device_record(network_code, device_id)
             .await?
-            .is_some_and(|device| device.client_type == ClientType::Ikev2);
-        if let Some(manager) = self.get_ikev2_manager() {
+            .map(|device| device.client_type);
+        if client_type == Some(ClientType::Ikev2)
+            && let Some(manager) = self.get_ikev2_manager()
+        {
+            manager.disconnect_device(network_code, device_id).await;
+        }
+        if client_type == Some(ClientType::Wireguard)
+            && let Some(manager) = self.get_wireguard_manager()
+        {
             manager.disconnect_device(network_code, device_id).await;
         }
         let mutation_lock = self
@@ -1060,8 +1203,11 @@ impl ControlService {
 
         db::delete_device(network_code, device_id).await?;
 
-        if was_ikev2 {
+        if client_type == Some(ClientType::Ikev2) {
             self.refresh_ikev2_credentials().await;
+        }
+        if client_type == Some(ClientType::Wireguard) {
+            self.refresh_wireguard_peers().await;
         }
 
         Ok(())
@@ -1104,6 +1250,41 @@ impl ControlService {
         destination: Ipv4Addr,
         payload: &[u8],
     ) -> anyhow::Result<bool> {
+        self.forward_external_packet(
+            network_code,
+            ClientType::Ikev2,
+            source,
+            destination,
+            payload,
+        )
+        .await
+    }
+
+    pub async fn forward_wireguard_packet(
+        &self,
+        network_code: &str,
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        payload: &[u8],
+    ) -> anyhow::Result<bool> {
+        self.forward_external_packet(
+            network_code,
+            ClientType::Wireguard,
+            source,
+            destination,
+            payload,
+        )
+        .await
+    }
+
+    async fn forward_external_packet(
+        &self,
+        network_code: &str,
+        source_type: ClientType,
+        source: Ipv4Addr,
+        destination: Ipv4Addr,
+        payload: &[u8],
+    ) -> anyhow::Result<bool> {
         use crate::protocol::ip_packet_protocol::{HEAD_LENGTH, MsgType, NetPacket};
         use pnet_packet::ipv4::Ipv4Packet;
 
@@ -1126,14 +1307,27 @@ impl ControlService {
             let local_device = self
                 .get_network_state(network_code)
                 .and_then(|state| state.get_device_entry_by_ip(destination));
-            if local_device.is_some_and(|device| !device.allow_ikev2) {
+            if local_device.is_some_and(|device| match source_type {
+                ClientType::Ikev2 => !device.allow_ikev2,
+                ClientType::Wireguard => !device.allow_wireguard,
+                ClientType::Vnt => true,
+            }) {
                 return Ok(false);
             }
         }
 
         let mut bytes = BytesMut::zeroed(HEAD_LENGTH + payload.len());
         let mut packet = NetPacket::new(&mut bytes)?;
-        packet.set_msg_type(MsgType::Ikev2Relay);
+        let msg_type = match destination_type {
+            ClientType::Ikev2 => MsgType::Ikev2Relay,
+            ClientType::Wireguard => MsgType::WireGuardRelay,
+            ClientType::Vnt => match source_type {
+                ClientType::Ikev2 => MsgType::Ikev2Relay,
+                ClientType::Wireguard => MsgType::WireGuardRelay,
+                ClientType::Vnt => return Ok(false),
+            },
+        };
+        packet.set_msg_type(msg_type);
         packet.set_gateway_flag(true);
         packet.set_ttl(5);
         packet.set_src_id(source.into());
@@ -1190,6 +1384,29 @@ impl ControlService {
 
     pub fn get_ikev2_runtime_error(&self) -> Option<String> {
         self.ikev2_runtime_error.read().clone()
+    }
+
+    pub fn set_wireguard_manager(&self, manager: crate::server::wireguard::WireGuardHandle) {
+        *self.wireguard_manager.write() = Some(manager);
+    }
+
+    pub fn get_wireguard_manager(&self) -> Option<crate::server::wireguard::WireGuardHandle> {
+        self.wireguard_manager.read().clone()
+    }
+
+    pub fn replace_wireguard_manager(
+        &self,
+        manager: Option<crate::server::wireguard::WireGuardHandle>,
+    ) -> Option<crate::server::wireguard::WireGuardHandle> {
+        std::mem::replace(&mut *self.wireguard_manager.write(), manager)
+    }
+
+    pub fn set_wireguard_runtime_error(&self, error: Option<String>) {
+        *self.wireguard_runtime_error.write() = error;
+    }
+
+    pub fn get_wireguard_runtime_error(&self) -> Option<String> {
+        self.wireguard_runtime_error.read().clone()
     }
 
     pub fn subnet_snapshot(
@@ -1348,6 +1565,7 @@ pub struct Session {
     pub network_state: Arc<NetworkState>,
     pub registration_status: RegistrationStatus,
     pub allow_ikev2: bool,
+    pub allow_wireguard: bool,
 }
 
 impl Drop for Session {
@@ -1444,6 +1662,7 @@ mod tests {
             registration_mode: RegistrationMode::Normal,
             advertised_subnets: Vec::new(),
             allow_ikev2: false,
+            allow_wireguard: false,
         }
     }
 
@@ -1732,7 +1951,7 @@ mod tests {
         // 模拟 B 已经同步到修改前的设备列表版本。
         let before = session_b
             .network_state
-            .changed_client_simple_list(session_b.ip, u64::MAX, false)
+            .changed_client_simple_list(session_b.ip, u64::MAX, false, false)
             .unwrap();
         assert!(before.is_all, "客户端版本高于服务端时必须全量恢复");
         let b_version = before.data_version;
@@ -1751,7 +1970,7 @@ mod tests {
 
         let update = session_b
             .network_state
-            .changed_client_simple_list(session_b.ip, b_version, false)
+            .changed_client_simple_list(session_b.ip, b_version, false, false)
             .expect("B 的版本落后时应收到完整设备列表");
         assert!(update.data_version > b_version);
         assert!(update.is_all);
@@ -1762,7 +1981,7 @@ mod tests {
         assert!(
             session_b
                 .network_state
-                .changed_client_simple_list(session_b.ip, migration_version, false)
+                .changed_client_simple_list(session_b.ip, migration_version, false, false)
                 .is_none(),
             "已经同步到迁移版本时不应重复下发"
         );
@@ -1775,7 +1994,7 @@ mod tests {
             .unwrap();
         let incremental = session_b
             .network_state
-            .changed_client_simple_list(session_b.ip, migration_version, false)
+            .changed_client_simple_list(session_b.ip, migration_version, false, false)
             .expect("新增设备后应有增量列表");
         assert!(!incremental.is_all);
         assert_eq!(incremental.list.len(), 1);
@@ -1784,7 +2003,7 @@ mod tests {
         // 一直停留在迁移前版本的客户端，即使服务端后来还有普通变化，仍必须全量。
         let stale_update = session_b
             .network_state
-            .changed_client_simple_list(session_b.ip, b_version, false)
+            .changed_client_simple_list(session_b.ip, b_version, false, false)
             .expect("未越过迁移屏障的客户端仍应收到全量列表");
         assert!(stale_update.is_all);
         assert!(stale_update.list.iter().any(|device| device.ip == new_ip));
@@ -2047,7 +2266,7 @@ mod tests {
             vec!["192.168.10.0/24".parse::<Ipv4Net>().unwrap()]
         );
 
-        let client_list = state.client_info_list(session_c.ip);
+        let client_list = state.client_info_list(session_c.ip, false, false);
         let dev = client_list.iter().find(|d| d.id == "device-a").unwrap();
         assert_eq!(dev.version, "2.0.5", "RPC 客户端列表应显示新版本");
     }
@@ -2206,9 +2425,13 @@ mod tests {
             "Office Phone"
         );
 
-        let hidden = vnt.network_state.full_client_simple_list(vnt.ip, false);
+        let hidden = vnt
+            .network_state
+            .full_client_simple_list(vnt.ip, false, false);
         assert!(!hidden.list.iter().any(|client| client.ip == ike.ip));
-        let visible = vnt.network_state.full_client_simple_list(vnt.ip, true);
+        let visible = vnt
+            .network_state
+            .full_client_simple_list(vnt.ip, true, false);
         assert!(visible.list.iter().any(|client| {
             client.ip == ike.ip
                 && client.client_type == crate::protocol::control_message::ClientType::Ikev2
@@ -2231,6 +2454,77 @@ mod tests {
         assert!(
             !service
                 .forward_ikev2_packet("ike-access", ike.ip, vnt.ip, &packet)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn wireguard_devices_get_keys_and_require_vnt_opt_in() {
+        let service = ControlService::new(
+            "10.94.0.0/24".parse().unwrap(),
+            HashMap::new(),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let (vnt_sender, _vnt_receiver) = mpsc::channel(8);
+        let vnt = service
+            .register(registration("wg-access", "vnt-a"), vnt_sender)
+            .await
+            .unwrap();
+        service
+            .add_device_typed(
+                "wg-access",
+                "wg-phone",
+                "10.94.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Wireguard,
+                None,
+                Some("WireGuard Phone".to_string()),
+            )
+            .await
+            .unwrap();
+        let record = service
+            .get_device_record("wg-access", "wg-phone")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(record.client_type, ClientType::Wireguard);
+        assert!(
+            record
+                .wireguard_private_key
+                .as_ref()
+                .is_some_and(|key| !key.is_empty())
+        );
+        assert!(
+            record
+                .wireguard_public_key
+                .as_ref()
+                .is_some_and(|key| !key.is_empty())
+        );
+
+        let (wg_sender, _wg_receiver) = mpsc::channel(8);
+        let wg = service
+            .register_wireguard("wg-access".to_string(), "wg-phone".to_string(), wg_sender)
+            .await
+            .unwrap();
+        let hidden = vnt
+            .network_state
+            .full_client_simple_list(vnt.ip, false, false);
+        assert!(!hidden.list.iter().any(|client| client.ip == wg.ip));
+        let visible = vnt
+            .network_state
+            .full_client_simple_list(vnt.ip, false, true);
+        assert!(visible.list.iter().any(|client| {
+            client.ip == wg.ip
+                && client.client_type == crate::protocol::control_message::ClientType::Wireguard
+        }));
+        let packet = test_ipv4(wg.ip, vnt.ip);
+        assert!(
+            !service
+                .forward_wireguard_packet("wg-access", wg.ip, vnt.ip, &packet)
                 .await
                 .unwrap()
         );

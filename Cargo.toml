@@ -24,6 +24,8 @@ x509-cert = "0.2"
 
 quinn = { version = "0.11", default-features = false, features = ["log", "platform-verifier", "rustls", "runtime-tokio"] }
 bytes = "1"
+base64 = "0.22"
+boringtun = "0.7.1"
 
 
 log = "0.4"

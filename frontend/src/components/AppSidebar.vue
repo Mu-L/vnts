@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChevronDown, LogOut, Network, Radio, Server, Settings, ShieldCheck } from '@lucide/vue'
+import { ChevronDown, LogOut, Network, Radio, Server, Settings, ShieldCheck, Waves } from '@lucide/vue'
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import AppLogo from './AppLogo.vue'
@@ -11,7 +11,7 @@ const { sectionStates } = useSettingsNavigation()
 const route = useRoute()
 const router = useRouter()
 const settingsActive = computed(() => route.name === 'settings')
-const activeSettingsSection = computed(() => route.query.section === 'ikev2' ? 'ikev2' : 'access-control')
+const activeSettingsSection = computed(() => route.query.section === 'ikev2' || route.query.section === 'wireguard' ? route.query.section : 'access-control')
 
 function handleLogout() {
   logout()
@@ -72,6 +72,15 @@ function handleLogout() {
               <Radio :size="15" class="shrink-0" />
               <span class="min-w-0 flex-1 truncate">IKEv2 服务</span>
               <span v-if="sectionStates.ikev2.dirty" class="h-2 w-2 shrink-0 rounded-full bg-amber-500" title="有未保存修改"></span>
+            </RouterLink>
+            <RouterLink
+              :to="{ name: 'settings', query: { section: 'wireguard' } }"
+              class="settings-submenu-item"
+              :class="activeSettingsSection === 'wireguard' ? 'settings-submenu-active' : ''"
+            >
+              <Waves :size="15" class="shrink-0" />
+              <span class="min-w-0 flex-1 truncate">WireGuard 服务</span>
+              <span v-if="sectionStates.wireguard.dirty" class="h-2 w-2 shrink-0 rounded-full bg-amber-500" title="有未保存修改"></span>
             </RouterLink>
           </div>
         </Transition>

@@ -89,7 +89,10 @@ pub struct DeviceEntry {
     pub ip_type: DeviceIpType,
     pub client_type: ClientType,
     pub ikev2_password: Option<String>,
+    pub wireguard_private_key: Option<String>,
+    pub wireguard_public_key: Option<String>,
     pub allow_ikev2: bool,
+    pub allow_wireguard: bool,
     pub random_id: u64,
     pub device_name: String,
     pub device_version: String,
@@ -127,7 +130,10 @@ impl DeviceEntry {
             ip_type: record.ip_type,
             client_type: record.client_type,
             ikev2_password: record.ikev2_password,
+            wireguard_private_key: record.wireguard_private_key,
+            wireguard_public_key: record.wireguard_public_key,
             allow_ikev2: false,
+            allow_wireguard: false,
             random_id: 0,
             device_name: record.device_name,
             device_version: record.device_version,
@@ -151,6 +157,8 @@ impl DeviceEntry {
             ip_type: self.ip_type,
             client_type: self.client_type,
             ikev2_password: self.ikev2_password.clone(),
+            wireguard_private_key: self.wireguard_private_key.clone(),
+            wireguard_public_key: self.wireguard_public_key.clone(),
             device_name: self.device_name.clone(),
             device_version: self.device_version.clone(),
             last_connect_time: system_time_to_i64(self.last_connect_time),
@@ -366,6 +374,18 @@ impl NetworkState {
             .collect()
     }
 
+    pub fn device_records_by_type(&self, client_type: ClientType) -> Vec<DeviceRecord> {
+        let network_code = self.network_code();
+        self.lease_state
+            .lock()
+            .device_map
+            .values()
+            .filter(|entry| entry.client_type == client_type)
+            .map(|entry| entry.to_record(&network_code))
+            .collect()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_device_config(
         &self,
         device_id: &str,
@@ -374,6 +394,8 @@ impl NetworkState {
         ip_type: DeviceIpType,
         client_type: ClientType,
         ikev2_password: Option<String>,
+        wireguard_private_key: Option<String>,
+        wireguard_public_key: Option<String>,
     ) -> anyhow::Result<Option<DeviceEntry>> {
         let mut guard = self.lease_state.lock();
         guard.validate_ip_available(ip, Some(device_id))?;
@@ -411,6 +433,10 @@ impl NetworkState {
             if ikev2_password.is_some() {
                 entry.ikev2_password = ikev2_password;
             }
+            if wireguard_private_key.is_some() {
+                entry.wireguard_private_key = wireguard_private_key;
+                entry.wireguard_public_key = wireguard_public_key;
+            }
             entry.data_version = data_version;
         } else {
             guard.device_map.insert(
@@ -421,7 +447,10 @@ impl NetworkState {
                     ip_type,
                     client_type,
                     ikev2_password,
+                    wireguard_private_key,
+                    wireguard_public_key,
                     allow_ikev2: false,
+                    allow_wireguard: false,
                     random_id: 0,
                     device_name,
                     device_version: String::new(),
@@ -682,6 +711,7 @@ impl NetworkState {
         exclude_ip: Ipv4Addr,
         data_version: u64,
         allow_ikev2: bool,
+        allow_wireguard: bool,
     ) -> Option<crate::protocol::control_message::ClientSimpleInfoList> {
         use crate::protocol::control_message::ClientSimpleInfo;
 
@@ -697,6 +727,7 @@ impl NetworkState {
                     v.ip.is_some()
                         && v.ip != Some(exclude_ip)
                         && (allow_ikev2 || v.client_type != ClientType::Ikev2)
+                        && (allow_wireguard || v.client_type != ClientType::Wireguard)
                 })
                 .map(|v| ClientSimpleInfo {
                     ip: v.ip.unwrap(),
@@ -704,6 +735,9 @@ impl NetworkState {
                     client_type: match v.client_type {
                         ClientType::Vnt => crate::protocol::control_message::ClientType::Vnt,
                         ClientType::Ikev2 => crate::protocol::control_message::ClientType::Ikev2,
+                        ClientType::Wireguard => {
+                            crate::protocol::control_message::ClientType::Wireguard
+                        }
                     },
                 })
                 .collect();
@@ -722,6 +756,7 @@ impl NetworkState {
                     && v.ip.is_some()
                     && v.ip != Some(exclude_ip)
                     && (allow_ikev2 || v.client_type != ClientType::Ikev2)
+                    && (allow_wireguard || v.client_type != ClientType::Wireguard)
             })
             .map(|v| ClientSimpleInfo {
                 ip: v.ip.unwrap(),
@@ -729,6 +764,9 @@ impl NetworkState {
                 client_type: match v.client_type {
                     ClientType::Vnt => crate::protocol::control_message::ClientType::Vnt,
                     ClientType::Ikev2 => crate::protocol::control_message::ClientType::Ikev2,
+                    ClientType::Wireguard => {
+                        crate::protocol::control_message::ClientType::Wireguard
+                    }
                 },
             })
             .collect();
@@ -744,6 +782,7 @@ impl NetworkState {
         &self,
         exclude_ip: Ipv4Addr,
         allow_ikev2: bool,
+        allow_wireguard: bool,
     ) -> crate::protocol::control_message::ClientSimpleInfoList {
         let guard = self.lease_state.lock();
         let list = guard
@@ -753,6 +792,7 @@ impl NetworkState {
                 entry.ip.is_some()
                     && entry.ip != Some(exclude_ip)
                     && (allow_ikev2 || entry.client_type != ClientType::Ikev2)
+                    && (allow_wireguard || entry.client_type != ClientType::Wireguard)
             })
             .map(|entry| crate::protocol::control_message::ClientSimpleInfo {
                 ip: entry.ip.unwrap(),
@@ -760,6 +800,9 @@ impl NetworkState {
                 client_type: match entry.client_type {
                     ClientType::Vnt => crate::protocol::control_message::ClientType::Vnt,
                     ClientType::Ikev2 => crate::protocol::control_message::ClientType::Ikev2,
+                    ClientType::Wireguard => {
+                        crate::protocol::control_message::ClientType::Wireguard
+                    }
                 },
             })
             .collect();
@@ -774,6 +817,8 @@ impl NetworkState {
     pub fn client_info_list(
         &self,
         exclude_ip: Ipv4Addr,
+        allow_ikev2: bool,
+        allow_wireguard: bool,
     ) -> Vec<crate::protocol::rpc_message::ClientInfo> {
         use crate::protocol::rpc_message::ClientInfo;
         use time::OffsetDateTime;
@@ -788,6 +833,11 @@ impl NetworkState {
             if ip == exclude_ip {
                 continue;
             }
+            if (entry.client_type == ClientType::Ikev2 && !allow_ikev2)
+                || (entry.client_type == ClientType::Wireguard && !allow_wireguard)
+            {
+                continue;
+            }
             let last_connect_time: OffsetDateTime = entry.last_connect_time.into();
             list.push(ClientInfo {
                 name: entry.device_name.clone(),
@@ -800,6 +850,9 @@ impl NetworkState {
                 client_type: match entry.client_type {
                     ClientType::Vnt => crate::protocol::rpc_message::ClientType::Vnt as i32,
                     ClientType::Ikev2 => crate::protocol::rpc_message::ClientType::Ikev2 as i32,
+                    ClientType::Wireguard => {
+                        crate::protocol::rpc_message::ClientType::Wireguard as i32
+                    }
                 },
             });
         }
@@ -970,6 +1023,7 @@ impl NetworkStateInner {
             device_entry.key_sign = reg_req.key_sign.clone();
             device_entry.client_type = client_type;
             device_entry.allow_ikev2 = reg_req.allow_ikev2;
+            device_entry.allow_wireguard = reg_req.allow_wireguard;
             device_entry.device_name = reg_req.name.clone();
             device_entry.device_version = reg_req.version.clone();
             device_entry.advertised_subnets = advertised_subnets.clone();
@@ -1036,6 +1090,7 @@ impl NetworkStateInner {
                     entry.key_sign = reg_req.key_sign;
                     entry.client_type = client_type;
                     entry.allow_ikev2 = reg_req.allow_ikev2;
+                    entry.allow_wireguard = reg_req.allow_wireguard;
                     entry.latency_ms = None;
                     entry.advertised_subnets = advertised_subnets.clone();
                     entry.subnet_advertisement_active = subnet_advertisement_active;
@@ -1047,7 +1102,10 @@ impl NetworkStateInner {
                         ip_type: DeviceIpType::Dynamic,
                         client_type,
                         ikev2_password: None,
+                        wireguard_private_key: None,
+                        wireguard_public_key: None,
                         allow_ikev2: reg_req.allow_ikev2,
+                        allow_wireguard: reg_req.allow_wireguard,
                         random_id,
                         device_name: reg_req.name,
                         device_version: reg_req.version,
@@ -1088,6 +1146,7 @@ impl NetworkStateInner {
             entry.key_sign = reg_req.key_sign;
             entry.client_type = client_type;
             entry.allow_ikev2 = reg_req.allow_ikev2;
+            entry.allow_wireguard = reg_req.allow_wireguard;
             entry.latency_ms = None;
             entry.advertised_subnets = advertised_subnets.clone();
             entry.subnet_advertisement_active = subnet_advertisement_active;
@@ -1099,7 +1158,10 @@ impl NetworkStateInner {
                 ip_type: DeviceIpType::Dynamic,
                 client_type,
                 ikev2_password: None,
+                wireguard_private_key: None,
+                wireguard_public_key: None,
                 allow_ikev2: reg_req.allow_ikev2,
+                allow_wireguard: reg_req.allow_wireguard,
                 random_id,
                 device_name: reg_req.name,
                 device_version: reg_req.version,
@@ -1310,6 +1372,7 @@ mod tests {
             registration_mode: RegistrationMode::Normal,
             advertised_subnets: Vec::new(),
             allow_ikev2: false,
+            allow_wireguard: false,
         }
     }
 
