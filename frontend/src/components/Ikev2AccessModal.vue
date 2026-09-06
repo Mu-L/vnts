@@ -73,13 +73,6 @@ async function downloadCa() {
   }
 }
 
-async function downloadServerCertificate() {
-  try {
-    await settingsApi.downloadIkev2ServerCertificate('der')
-  } catch (error) {
-    toast.error(error instanceof ApiError ? error.message : '下载服务器证书失败')
-  }
-}
 </script>
 
 <template>
@@ -125,11 +118,10 @@ async function downloadServerCertificate() {
         </div>
       </div>
 
-      <div v-if="info.service.ca_download_available || info.service.server_certificate_download_available" class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
-        <span class="min-w-56 flex-1 text-slate-600 dark:text-slate-300">正常连接应安装并信任 VNT IKEv2 CA；服务器证书下载用于诊断或需要直接信任叶证书的客户端。</span>
+      <div v-if="info.service.ca_download_available" class="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+        <span class="min-w-56 flex-1 text-slate-600 dark:text-slate-300">正常连接应安装并信任 VNT IKEv2 CA。</span>
         <div class="flex flex-wrap gap-2">
           <button v-if="info.service.ca_download_available" type="button" class="secondary" @click="downloadCa"><Download :size="14" />下载 CA</button>
-          <button v-if="info.service.server_certificate_download_available" type="button" class="secondary" @click="downloadServerCertificate"><Download :size="14" />下载服务器证书</button>
         </div>
       </div>
 
