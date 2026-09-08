@@ -442,7 +442,7 @@ impl ControlService {
             ip_variable: false,
             server_id: 0,
             registration_mode: RegistrationMode::Normal,
-            advertised_subnets: Vec::new(),
+            advertised_subnets: entry.advertised_subnets,
             allow_ikev2: true,
             allow_wireguard: true,
         };
@@ -799,6 +799,47 @@ impl ControlService {
         Ok(())
     }
 
+    fn normalize_subnet_config(
+        config: NetworkConfig,
+        device_ip: Ipv4Addr,
+        mut output_subnets: Vec<Ipv4Net>,
+        mut input_routes: Vec<Ikev2InputRoute>,
+        protocol: &str,
+    ) -> anyhow::Result<(Vec<Ipv4Net>, Vec<Ikev2InputRoute>)> {
+        output_subnets = output_subnets
+            .into_iter()
+            .map(|subnet| subnet.trunc())
+            .collect();
+        output_subnets.sort_by_key(|net| (u32::from(net.network()), net.prefix_len()));
+        output_subnets.dedup();
+        if output_subnets.len() > 254 {
+            bail!("{protocol} 出口子网不能超过 254 条");
+        }
+        for route in &mut input_routes {
+            route.subnet = route.subnet.trunc();
+            Self::validate_device_ip(config, route.target_ip)?;
+            if route.target_ip == device_ip {
+                bail!("{protocol} 入口路由的目标 IP 不能是设备自身 IP");
+            }
+        }
+        input_routes.sort_by_key(|route| {
+            (
+                std::cmp::Reverse(route.subnet.prefix_len()),
+                u32::from(route.subnet.network()),
+            )
+        });
+        if input_routes
+            .windows(2)
+            .any(|routes| routes[0].subnet == routes[1].subnet)
+        {
+            bail!("同一 {protocol} 设备不能为相同入口子网配置多个目标 IP");
+        }
+        if input_routes.len() > 254 {
+            bail!("{protocol} 入口路由不能超过 254 条");
+        }
+        Ok((output_subnets, input_routes))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn upsert_device(
         &self,
@@ -810,6 +851,8 @@ impl ControlService {
         device_name: Option<String>,
         ikev2_output_subnets: Option<Vec<Ipv4Net>>,
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
+        wireguard_output_subnets: Option<Vec<Ipv4Net>>,
+        wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
         mutation: DeviceMutation,
     ) -> anyhow::Result<()> {
         if device_id.is_empty()
@@ -853,64 +896,103 @@ impl ControlService {
                 .map(|entry| entry.client_type)
                 .context("设备不存在")?,
         };
-        let (ikev2_output_subnets, ikev2_input_routes) = if client_type == ClientType::Ikev2 {
-            let mut output_subnets = ikev2_output_subnets
-                .or_else(|| {
-                    existing
-                        .as_ref()
-                        .map(|entry| entry.advertised_subnets.clone())
-                })
-                .unwrap_or_default()
-                .into_iter()
-                .map(|subnet| subnet.trunc())
-                .collect::<Vec<_>>();
-            output_subnets.sort_by_key(|net| (u32::from(net.network()), net.prefix_len()));
-            output_subnets.dedup();
-            if output_subnets.len() > 254 {
-                bail!("IKEv2 出口子网不能超过 254 条");
-            }
-
-            let mut input_routes = ikev2_input_routes
-                .or_else(|| {
-                    existing
-                        .as_ref()
-                        .map(|entry| entry.ikev2_input_routes.clone())
-                })
-                .unwrap_or_default();
-            for route in &mut input_routes {
-                route.subnet = route.subnet.trunc();
-                Self::validate_device_ip(config, route.target_ip)?;
-                if route.target_ip == ip {
-                    bail!("IKEv2 入口路由的目标 IP 不能是设备自身 IP");
-                }
-            }
-            input_routes.sort_by_key(|route| {
-                (
-                    std::cmp::Reverse(route.subnet.prefix_len()),
-                    u32::from(route.subnet.network()),
-                )
-            });
-            if input_routes
-                .windows(2)
-                .any(|routes| routes[0].subnet == routes[1].subnet)
-            {
-                bail!("同一 IKEv2 设备不能为相同入口子网配置多个目标 IP");
-            }
-            if input_routes.len() > 254 {
-                bail!("IKEv2 入口路由不能超过 254 条");
-            }
-            (output_subnets, input_routes)
+        // WireGuard peers are provisioned by the server with a stable tunnel address. Keep the
+        // persisted/API IP type consistent even when an older client submits Dynamic or Fixed.
+        let ip_type = if client_type == ClientType::Wireguard {
+            DeviceIpType::Static
         } else {
-            if ikev2_output_subnets
-                .as_ref()
-                .is_some_and(|value| !value.is_empty())
-                || ikev2_input_routes
+            ip_type
+        };
+        let (
+            ikev2_output_subnets,
+            ikev2_input_routes,
+            wireguard_output_subnets,
+            wireguard_input_routes,
+        ) = match client_type {
+            ClientType::Ikev2 => {
+                if wireguard_output_subnets
                     .as_ref()
                     .is_some_and(|value| !value.is_empty())
-            {
-                bail!("只有 IKEv2 设备可以配置入口或出口子网");
+                    || wireguard_input_routes
+                        .as_ref()
+                        .is_some_and(|value| !value.is_empty())
+                {
+                    bail!("IKEv2 设备不能配置 WireGuard 入口或出口子网");
+                }
+                let output_subnets = ikev2_output_subnets
+                    .or_else(|| {
+                        existing
+                            .as_ref()
+                            .map(|entry| entry.advertised_subnets.clone())
+                    })
+                    .unwrap_or_default();
+                let input_routes = ikev2_input_routes
+                    .or_else(|| {
+                        existing
+                            .as_ref()
+                            .map(|entry| entry.ikev2_input_routes.clone())
+                    })
+                    .unwrap_or_default();
+                let (outputs, routes) = Self::normalize_subnet_config(
+                    config,
+                    ip,
+                    output_subnets,
+                    input_routes,
+                    "IKEv2",
+                )?;
+                (outputs, routes, Vec::new(), Vec::new())
             }
-            (Vec::new(), Vec::new())
+            ClientType::Wireguard => {
+                if ikev2_output_subnets
+                    .as_ref()
+                    .is_some_and(|value| !value.is_empty())
+                    || ikev2_input_routes
+                        .as_ref()
+                        .is_some_and(|value| !value.is_empty())
+                {
+                    bail!("WireGuard 设备不能配置 IKEv2 入口或出口子网");
+                }
+                let output_subnets = wireguard_output_subnets
+                    .or_else(|| {
+                        existing
+                            .as_ref()
+                            .map(|entry| entry.advertised_subnets.clone())
+                    })
+                    .unwrap_or_default();
+                let input_routes = wireguard_input_routes
+                    .or_else(|| {
+                        existing
+                            .as_ref()
+                            .map(|entry| entry.wireguard_input_routes.clone())
+                    })
+                    .unwrap_or_default();
+                let (outputs, routes) = Self::normalize_subnet_config(
+                    config,
+                    ip,
+                    output_subnets,
+                    input_routes,
+                    "WireGuard",
+                )?;
+                (Vec::new(), Vec::new(), outputs, routes)
+            }
+            ClientType::Vnt => {
+                if ikev2_output_subnets
+                    .as_ref()
+                    .is_some_and(|value| !value.is_empty())
+                    || ikev2_input_routes
+                        .as_ref()
+                        .is_some_and(|value| !value.is_empty())
+                    || wireguard_output_subnets
+                        .as_ref()
+                        .is_some_and(|value| !value.is_empty())
+                    || wireguard_input_routes
+                        .as_ref()
+                        .is_some_and(|value| !value.is_empty())
+                {
+                    bail!("只有 IKEv2 或 WireGuard 设备可以配置入口或出口子网");
+                }
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+            }
         };
         let password = match client_type {
             ClientType::Vnt => {
@@ -996,9 +1078,9 @@ impl ControlService {
             manager.disconnect_device(network_code, device_id).await;
         }
         if matches!(mutation, DeviceMutation::Update)
-            && existing
-                .as_ref()
-                .is_some_and(|entry| entry.client_type == ClientType::Wireguard)
+            && existing.as_ref().is_some_and(|entry| {
+                entry.client_type == ClientType::Wireguard && entry.ip != Some(ip)
+            })
             && let Some(manager) = self.get_wireguard_manager()
         {
             manager.disconnect_device(network_code, device_id).await;
@@ -1015,6 +1097,8 @@ impl ControlService {
             wireguard_public_key,
             ikev2_output_subnets,
             ikev2_input_routes,
+            wireguard_output_subnets,
+            wireguard_input_routes,
         )?;
         let record = state
             .get_device_entry(device_id)
@@ -1045,6 +1129,8 @@ impl ControlService {
         device_name: Option<String>,
         ikev2_output_subnets: Option<Vec<Ipv4Net>>,
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
+        wireguard_output_subnets: Option<Vec<Ipv4Net>>,
+        wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -1055,6 +1141,8 @@ impl ControlService {
             device_name,
             ikev2_output_subnets,
             ikev2_input_routes,
+            wireguard_output_subnets,
+            wireguard_input_routes,
             DeviceMutation::Create(client_type),
         )
         .await
@@ -1078,6 +1166,8 @@ impl ControlService {
             None,
             None,
             None,
+            None,
+            None,
         )
         .await
     }
@@ -1093,6 +1183,8 @@ impl ControlService {
         device_name: Option<String>,
         ikev2_output_subnets: Option<Vec<Ipv4Net>>,
         ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
+        wireguard_output_subnets: Option<Vec<Ipv4Net>>,
+        wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -1103,6 +1195,8 @@ impl ControlService {
             device_name,
             ikev2_output_subnets,
             ikev2_input_routes,
+            wireguard_output_subnets,
+            wireguard_input_routes,
             DeviceMutation::Update,
         )
         .await
@@ -1121,6 +1215,8 @@ impl ControlService {
             device_id,
             ip,
             ip_type,
+            None,
+            None,
             None,
             None,
             None,
@@ -1385,18 +1481,34 @@ impl ControlService {
     pub async fn forward_wireguard_packet(
         &self,
         network_code: &str,
+        device_id: &str,
         source: Ipv4Addr,
-        destination: Ipv4Addr,
         payload: &[u8],
     ) -> anyhow::Result<bool> {
-        self.forward_external_packet(
-            network_code,
-            ClientType::Wireguard,
-            source,
-            destination,
-            payload,
-        )
-        .await
+        use pnet_packet::ipv4::Ipv4Packet;
+        let Some(ipv4) = Ipv4Packet::new(payload) else {
+            return Ok(false);
+        };
+        let destination = ipv4.get_destination();
+        let Some(target) = self.wireguard_route_target(network_code, device_id, destination) else {
+            return Ok(false);
+        };
+        self.forward_external_packet(network_code, ClientType::Wireguard, source, target, payload)
+            .await
+    }
+
+    pub fn wireguard_route_target(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        destination: Ipv4Addr,
+    ) -> Option<Ipv4Addr> {
+        let state = self.get_network_state(network_code)?;
+        if state.network_contains(destination) {
+            Some(destination)
+        } else {
+            state.wireguard_input_target(device_id, destination)
+        }
     }
 
     async fn forward_external_packet(
@@ -1639,6 +1751,8 @@ impl ControlService {
                                 advertised_subnets: Vec::new(),
                                 ikev2_output_subnets: r.ikev2_output_subnets,
                                 ikev2_input_routes: r.ikev2_input_routes,
+                                wireguard_output_subnets: r.wireguard_output_subnets,
+                                wireguard_input_routes: r.wireguard_input_routes,
                                 tx_bytes: r.tx_bytes as u64,
                                 rx_bytes: r.rx_bytes as u64,
                                 client_type: r.client_type,
@@ -1672,6 +1786,8 @@ impl ControlService {
                     advertised_subnets,
                     ikev2_output_subnets: Vec::new(),
                     ikev2_input_routes: Vec::new(),
+                    wireguard_output_subnets: Vec::new(),
+                    wireguard_input_routes: Vec::new(),
                     tx_bytes: 0,
                     rx_bytes: 0,
                     client_type,
@@ -1742,6 +1858,8 @@ pub struct DeviceInfoVO {
     pub advertised_subnets: Vec<Ipv4Net>,
     pub ikev2_output_subnets: Vec<Ipv4Net>,
     pub ikev2_input_routes: Vec<Ikev2InputRoute>,
+    pub wireguard_output_subnets: Vec<Ipv4Net>,
+    pub wireguard_input_routes: Vec<Ikev2InputRoute>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub client_type: ClientType,
@@ -2427,6 +2545,8 @@ mod tests {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .await
                 .is_err()
@@ -2442,6 +2562,8 @@ mod tests {
                 Some("Alice Phone".to_string()),
                 None,
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -2454,6 +2576,8 @@ mod tests {
                     DeviceIpType::Fixed,
                     ClientType::Ikev2,
                     Some("other-password".to_string()),
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -2487,6 +2611,8 @@ mod tests {
                 Some("Alice Tablet".to_string()),
                 None,
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -2511,6 +2637,8 @@ mod tests {
                 DeviceIpType::Static,
                 None,
                 Some("Alice Laptop".to_string()),
+                None,
+                None,
                 None,
                 None,
             )
@@ -2561,6 +2689,8 @@ mod tests {
                 Some("Branch router".to_string()),
                 Some(outputs),
                 Some(routes),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -2632,6 +2762,8 @@ mod tests {
                     None,
                     None,
                     Some(duplicate),
+                    None,
+                    None,
                 )
                 .await
                 .is_err()
@@ -2647,6 +2779,8 @@ mod tests {
                     None,
                     None,
                     Some(vec!["198.51.100.0/24".parse().unwrap()]),
+                    None,
+                    None,
                     None,
                 )
                 .await
@@ -2678,6 +2812,8 @@ mod tests {
                 ClientType::Ikev2,
                 Some("password".to_string()),
                 Some("Office Phone".to_string()),
+                None,
+                None,
                 None,
                 None,
             )
@@ -2731,6 +2867,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wireguard_subnet_config_updates_online_without_disconnect() {
+        let service = ControlService::new(
+            "10.97.0.0/24".parse().unwrap(),
+            HashMap::from([("wg-subnets".to_string(), "10.97.0.0/24".parse().unwrap())]),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        service
+            .add_device_typed(
+                "wg-subnets",
+                "router",
+                "10.97.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Wireguard,
+                None,
+                Some("WG router".to_string()),
+                None,
+                None,
+                Some(vec!["192.168.40.7/24".parse().unwrap()]),
+                Some(vec![
+                    Ikev2InputRoute {
+                        subnet: "10.210.0.7/16".parse().unwrap(),
+                        target_ip: "10.97.0.20".parse().unwrap(),
+                    },
+                    Ikev2InputRoute {
+                        subnet: "10.210.10.9/24".parse().unwrap(),
+                        target_ip: "10.97.0.21".parse().unwrap(),
+                    },
+                ]),
+            )
+            .await
+            .unwrap();
+        let (sender, _receiver) = mpsc::channel(8);
+        let session = service
+            .register_wireguard("wg-subnets".to_string(), "router".to_string(), sender)
+            .await
+            .unwrap();
+        let before = session
+            .network_state
+            .get_device_entry("router")
+            .unwrap()
+            .data_version;
+
+        service
+            .update_device_with_password(
+                "wg-subnets",
+                "router",
+                session.ip,
+                DeviceIpType::Fixed,
+                None,
+                Some("WG router updated".to_string()),
+                None,
+                None,
+                Some(vec![
+                    "172.22.0.1/16".parse().unwrap(),
+                    "172.22.0.0/16".parse().unwrap(),
+                ]),
+                None,
+            )
+            .await
+            .unwrap();
+        let entry = session.network_state.get_device_entry("router").unwrap();
+        assert!(entry.is_connected);
+        assert!(entry.data_version > before);
+        assert_eq!(
+            entry.advertised_subnets,
+            vec!["172.22.0.0/16".parse().unwrap()]
+        );
+        assert!(service.address_owned_by("wg-subnets", session.ip, "172.22.1.9".parse().unwrap(),));
+        assert_eq!(
+            service
+                .wireguard_route_target("wg-subnets", "router", "10.210.10.42".parse().unwrap(),),
+            Some("10.97.0.21".parse().unwrap())
+        );
+        assert_eq!(
+            service
+                .wireguard_route_target("wg-subnets", "router", "10.210.99.42".parse().unwrap(),),
+            Some("10.97.0.20".parse().unwrap())
+        );
+    }
+
+    #[tokio::test]
     async fn wireguard_devices_get_keys_and_require_vnt_opt_in() {
         let service = ControlService::new(
             "10.94.0.0/24".parse().unwrap(),
@@ -2756,6 +2976,8 @@ mod tests {
                 Some("WireGuard Phone".to_string()),
                 None,
                 None,
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -2765,6 +2987,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(record.client_type, ClientType::Wireguard);
+        assert_eq!(record.ip_type, DeviceIpType::Static);
         assert!(
             record
                 .wireguard_private_key
@@ -2797,7 +3020,7 @@ mod tests {
         let packet = test_ipv4(wg.ip, vnt.ip);
         assert!(
             !service
-                .forward_wireguard_packet("wg-access", wg.ip, vnt.ip, &packet)
+                .forward_wireguard_packet("wg-access", "wg-phone", wg.ip, &packet)
                 .await
                 .unwrap()
         );

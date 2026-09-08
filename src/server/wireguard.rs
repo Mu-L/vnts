@@ -374,10 +374,15 @@ impl WireGuardService {
         let ipv4 = checked_ipv4(&packet)?;
         let source = ipv4.get_source();
         let destination = ipv4.get_destination();
-        if source != peer.config.ip {
+        if !self
+            .control
+            .address_owned_by(&peer.config.network_code, peer.config.ip, source)
+        {
             bail!("WireGuard 源 IP 冒充: {source}");
         }
         let network_code = peer.config.network_code.clone();
+        let device_id = peer.config.device_id.clone();
+        let source_id = peer.config.ip;
         let state = peer._session.network_state.clone();
         let gateway = state.gateway();
         let broadcast = ipnet::Ipv4Net::new(state.gateway(), state.net_prefix_len())?
@@ -425,7 +430,7 @@ impl WireGuardService {
             return Ok(());
         }
         self.control
-            .forward_wireguard_packet(&network_code, source, destination, &packet)
+            .forward_wireguard_packet(&network_code, &device_id, source_id, &packet)
             .await?;
         Ok(())
     }
@@ -440,9 +445,18 @@ impl WireGuardService {
             .get(&relay.public_key)
             .context("WireGuard peer 已断开")?;
         let ipv4 = checked_ipv4(packet.payload())?;
+        let source_id = Ipv4Addr::from(packet.src_id());
         if Ipv4Addr::from(packet.dest_id()) != peer.config.ip
-            || ipv4.get_source() != Ipv4Addr::from(packet.src_id())
-            || ipv4.get_destination() != peer.config.ip
+            || !self.control.address_owned_by(
+                &peer.config.network_code,
+                source_id,
+                ipv4.get_source(),
+            )
+            || !self.control.address_owned_by(
+                &peer.config.network_code,
+                peer.config.ip,
+                ipv4.get_destination(),
+            )
         {
             bail!("WireGuard relay 地址不匹配");
         }
@@ -749,6 +763,8 @@ mod tests {
                 Some("WG peer".to_string()),
                 None,
                 None,
+                Some(vec!["192.168.50.0/24".parse().unwrap()]),
+                None,
             )
             .await
             .unwrap();
@@ -766,7 +782,8 @@ mod tests {
             private_key: Some(server_private.clone()),
             persistent_keepalive: 25,
         };
-        let handle = start(config, control).await.unwrap();
+        let handle = start(config, control.clone()).await.unwrap();
+        control.set_wireguard_manager(handle.clone());
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_public =
             PublicKey::from(&StaticSecret::from(decode_key(&server_private).unwrap()));
@@ -801,6 +818,22 @@ mod tests {
             result => panic!("unexpected handshake response: {result:?}"),
         }
 
+        control
+            .update_device_with_password(
+                "wg-test",
+                "wg-peer",
+                "10.95.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                None,
+                Some("WG peer".to_string()),
+                None,
+                None,
+                Some(vec!["192.168.51.0/24".parse().unwrap()]),
+                None,
+            )
+            .await
+            .unwrap();
+
         let mut ping = vec![0u8; 28];
         {
             let mut ipv4 = MutableIpv4Packet::new(&mut ping).unwrap();
@@ -809,7 +842,7 @@ mod tests {
             ipv4.set_total_length(28);
             ipv4.set_ttl(64);
             ipv4.set_next_level_protocol(pnet_packet::ip::IpNextHeaderProtocols::Icmp);
-            ipv4.set_source("10.95.0.8".parse().unwrap());
+            ipv4.set_source("192.168.51.7".parse().unwrap());
             ipv4.set_destination("10.95.0.1".parse().unwrap());
             let mut icmp = MutableIcmpPacket::new(ipv4.payload_mut()).unwrap();
             icmp.set_icmp_type(IcmpTypes::EchoRequest);
@@ -838,7 +871,7 @@ mod tests {
         assert_eq!(reply.get_source(), "10.95.0.1".parse::<Ipv4Addr>().unwrap());
         assert_eq!(
             reply.get_destination(),
-            "10.95.0.8".parse::<Ipv4Addr>().unwrap()
+            "192.168.51.7".parse::<Ipv4Addr>().unwrap()
         );
         handle.shutdown().await;
     }

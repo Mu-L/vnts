@@ -416,8 +416,16 @@ impl ControlHandler {
                 if ipv4.get_version() != 4
                     || header_length < Ipv4Packet::minimum_packet_size()
                     || ipv4.get_total_length() as usize != packet.payload().len()
-                    || ipv4.get_source() != src
-                    || ipv4.get_destination() != dest
+                    || !self.control_service.address_owned_by(
+                        &session.network_code,
+                        src,
+                        ipv4.get_source(),
+                    )
+                    || !self.control_service.address_owned_by(
+                        &session.network_code,
+                        dest,
+                        ipv4.get_destination(),
+                    )
                 {
                     return Ok(());
                 }

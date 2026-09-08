@@ -383,6 +383,7 @@ async fn get_device_wireguard_access(
     let Some(ip) = device.ip.as_deref() else {
         return no_store(ApiResponse::<()>::err("WireGuard 设备未配置 IP").into_response());
     };
+    let wireguard_input_routes = device.wireguard_input_routes.clone();
     let (Some(private_key), Some(public_key)) =
         (device.wireguard_private_key, device.wireguard_public_key)
     else {
@@ -407,9 +408,21 @@ async fn get_device_wireguard_access(
     let Some(network) = network else {
         return no_store(ApiResponse::<()>::err("网络不存在").into_response());
     };
+    let mut allowed_ips = vec![network.net.to_string()];
+    for subnet in wireguard_input_routes
+        .iter()
+        .map(|route| route.subnet.to_string())
+    {
+        if !allowed_ips.contains(&subnet) {
+            allowed_ips.push(subnet);
+        }
+    }
     let config_text = format!(
         "[Interface]\nPrivateKey = {private_key}\nAddress = {ip}/{}\n\n[Peer]\nPublicKey = {server_public_key}\nAllowedIPs = {}\nEndpoint = {}\nPersistentKeepalive = {}\n",
-        network.netmask, network.net, service_config.endpoint, service_config.persistent_keepalive,
+        network.netmask,
+        allowed_ips.join(", "),
+        service_config.endpoint,
+        service_config.persistent_keepalive,
     );
     no_store(
         ApiResponse::ok(WireGuardAccessInfo {
@@ -1166,6 +1179,10 @@ struct CreateDeviceRequest {
     ikev2_output_subnets: Vec<ipnet::Ipv4Net>,
     #[serde(default)]
     ikev2_input_routes: Vec<Ikev2InputRoute>,
+    #[serde(default)]
+    wireguard_output_subnets: Vec<ipnet::Ipv4Net>,
+    #[serde(default)]
+    wireguard_input_routes: Vec<Ikev2InputRoute>,
 }
 
 async fn create_device(
@@ -1188,6 +1205,8 @@ async fn create_device(
             body.device_name,
             Some(body.ikev2_output_subnets),
             Some(body.ikev2_input_routes),
+            Some(body.wireguard_output_subnets),
+            Some(body.wireguard_input_routes),
         )
         .await
     {
@@ -1205,6 +1224,8 @@ struct UpdateDeviceRequest {
     ikev2_password: Option<String>,
     ikev2_output_subnets: Option<Vec<ipnet::Ipv4Net>>,
     ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
+    wireguard_output_subnets: Option<Vec<ipnet::Ipv4Net>>,
+    wireguard_input_routes: Option<Vec<Ikev2InputRoute>>,
 }
 
 async fn update_device(
@@ -1227,6 +1248,8 @@ async fn update_device(
             body.device_name,
             body.ikev2_output_subnets,
             body.ikev2_input_routes,
+            body.wireguard_output_subnets,
+            body.wireguard_input_routes,
         )
         .await
     {
@@ -1649,6 +1672,8 @@ mod tests {
                     subnet: "172.20.0.0/16".parse().unwrap(),
                     target_ip: "10.60.0.20".parse().unwrap(),
                 }]),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -1750,6 +1775,11 @@ persistent_keepalive = 25
                 Some("Alice WG".to_string()),
                 None,
                 None,
+                Some(vec!["192.168.90.7/24".parse().unwrap()]),
+                Some(vec![Ikev2InputRoute {
+                    subnet: "172.30.0.9/16".parse().unwrap(),
+                    target_ip: "10.61.0.20".parse().unwrap(),
+                }]),
             )
             .await
             .unwrap();
@@ -1801,6 +1831,10 @@ persistent_keepalive = 25
         )
         .unwrap();
         assert!(!list_body.contains(&private_key));
+        assert!(list_body.contains("\"wireguard_output_subnets\":[\"192.168.90.0/24\"]"));
+        assert!(list_body.contains(
+            "\"wireguard_input_routes\":[{\"subnet\":\"172.30.0.0/16\",\"target_ip\":\"10.61.0.20\"}]"
+        ));
         let access = app
             .oneshot(
                 Request::builder()
@@ -1824,7 +1858,7 @@ persistent_keepalive = 25
         .unwrap();
         assert!(body.contains(&private_key));
         assert!(body.contains("[Interface]\\nPrivateKey"));
-        assert!(body.contains("AllowedIPs = 10.61.0.0/24"));
+        assert!(body.contains("AllowedIPs = 10.61.0.0/24, 172.30.0.0/16"));
     }
 
     #[tokio::test]
