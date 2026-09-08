@@ -3680,6 +3680,7 @@ dependencies = [
  "rustls-pemfile",
  "ryke",
  "serde",
+ "serde_json",
  "sha2",
  "sqlx",
  "tempfile",

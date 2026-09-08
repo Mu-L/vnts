@@ -8,11 +8,12 @@ use pnet_packet::ipv4::Ipv4Packet;
 use rand::RngCore;
 use rsa::pkcs8::DecodePrivateKey;
 use ryke::{
-    AssignedConfig, ChildSa, CompletedSaInit, CookiePolicy, EapEvent, EapResponder, Entropy,
-    ExchangeType, Identification, IkeHeader, LocalSecret, MessageBuilder, Notify, PayloadType,
-    Role, SaInitResult, ServerAuth, SigningKey, TrafficSelector, TrafficSelectors, build_encrypted,
-    build_informational, is_eap_request, is_ike_sa_rekey, open_encrypted, open_informational,
-    payloads, responder_process_ike_rekey, responder_process_rekey, responder_respond_natt,
+    AssignedConfig, ChildSa, CompletedSaInit, ConfigAttr, Configuration, CookiePolicy, EapEvent,
+    EapResponder, Entropy, ExchangeType, Identification, IkeHeader, LocalSecret, MessageBuilder,
+    Notify, PayloadType, Role, SaInitResult, ServerAuth, SigningKey, TrafficSelector,
+    TrafficSelectors, build_encrypted, build_informational, is_eap_request, is_ike_sa_rekey,
+    open_encrypted, open_informational, payloads, responder_process_ike_rekey,
+    responder_process_rekey, responder_respond_natt,
 };
 use std::collections::HashMap;
 use std::io::Cursor;
@@ -712,7 +713,19 @@ impl Engine {
                     .context("EAP selected CHILD_SA proposal missing")?;
                 let network =
                     Ipv4Net::new(session.ip, session.network_state.net_prefix_len())?.trunc();
-                let response = narrow_tsr(&response, &pending.sa, network, &mut self.entropy)?;
+                let entry = session
+                    .network_state
+                    .get_device_entry(&session.device_id)
+                    .context("IKEv2 device configuration disappeared")?;
+                let response = rewrite_child_policy(
+                    &response,
+                    &pending.sa,
+                    session.ip,
+                    network,
+                    &entry.advertised_subnets,
+                    &entry.ikev2_input_routes,
+                    &mut self.entropy,
+                )?;
                 let child = ChildSa::derive(
                     &pending.sa.keys.sk_d,
                     &pending.sa.ni,
@@ -850,7 +863,7 @@ impl Engine {
         let spi = u32::from_be_bytes(data[..4].try_into()?);
         let sequence = u32::from_be_bytes(data[4..8].try_into()?);
         let session_id = *self.esp_to_session.get(&spi).context("unknown ESP SPI")?;
-        let (network_code, source, destination, inner) = {
+        let (network_code, device_id, source_id, inner) = {
             let established = self
                 .established
                 .get_mut(&session_id)
@@ -866,15 +879,7 @@ impl Engine {
             if next_header != ryke::esp::next_header::IPV4 {
                 bail!("only inner IPv4 is supported");
             }
-            let (source, destination, total_length) =
-                checked_ipv4(&inner).context("invalid inner IPv4 packet")?;
-            if source != established.session.ip
-                || !established.network.contains(&destination)
-                || destination == established.network.network()
-                || destination == established.network.broadcast()
-            {
-                bail!("inner IPv4 source or destination is outside the assigned network");
-            }
+            let (_, _, total_length) = checked_ipv4(&inner).context("invalid inner IPv4 packet")?;
             established.replay.record(sequence);
             established.peer = peer;
             established.natt = true;
@@ -882,14 +887,14 @@ impl Engine {
             inner.truncate(total_length);
             (
                 established.session.network_code.clone(),
-                source,
-                destination,
+                established.session.device_id.clone(),
+                established.session.ip,
                 inner,
             )
         };
         let _ = self
             .control
-            .forward_ikev2_packet(&network_code, source, destination, &inner)
+            .forward_ikev2_packet(&network_code, &device_id, source_id, &inner)
             .await?;
         Ok(())
     }
@@ -993,8 +998,16 @@ impl Engine {
             if (destination != established.session.ip
                 && destination != network_broadcast
                 && !destination.is_broadcast())
-                || inner_source != source
-                || inner_destination != destination
+                || !self.control.address_owned_by(
+                    &established.session.network_code,
+                    source,
+                    inner_source,
+                )
+                || !self.control.address_owned_by(
+                    &established.session.network_code,
+                    destination,
+                    inner_destination,
+                )
             {
                 bail!("relay packet address mismatch");
             }
@@ -1150,10 +1163,18 @@ impl Engine {
                 Some(established.session.ip),
             )
             .map_err(anyhow::Error::msg)?;
-            let response = narrow_tsr(
+            let entry = established
+                .session
+                .network_state
+                .get_device_entry(&established.session.device_id)
+                .context("IKEv2 device configuration disappeared")?;
+            let response = rewrite_child_policy(
                 &response,
                 &established.sa,
+                established.session.ip,
                 established.network,
+                &entry.advertised_subnets,
+                &entry.ikev2_input_routes,
                 &mut self.entropy,
             )?;
             let old_spi = established.child.inbound.spi();
@@ -1385,34 +1406,63 @@ fn advertise_fragmentation(message: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(builder.push(PayloadType::Notify, notify.to_bytes()).build())
 }
 
-fn narrow_tsr(
+fn selector_for_subnet(network: Ipv4Net) -> TrafficSelector {
+    TrafficSelector {
+        ts_type: 7,
+        ip_protocol: 0,
+        start_port: 0,
+        end_port: u16::MAX,
+        start_addr: network.network().octets().to_vec(),
+        end_addr: network.broadcast().octets().to_vec(),
+    }
+}
+
+fn rewrite_child_policy(
     response: &[u8],
     sa: &CompletedSaInit,
+    assigned_ip: Ipv4Addr,
     network: Ipv4Net,
+    output_subnets: &[Ipv4Net],
+    input_routes: &[crate::server::control_server::db::Ikev2InputRoute],
     entropy: &mut impl Entropy,
 ) -> anyhow::Result<Vec<u8>> {
     let header = IkeHeader::parse(response).map_err(anyhow::Error::msg)?;
     let (first, inner) = open_outbound_encrypted(sa, response)?;
-    let selector = TrafficSelectors {
-        selectors: vec![TrafficSelector {
-            ts_type: 7,
-            ip_protocol: 0,
-            start_port: 0,
-            end_port: u16::MAX,
-            start_addr: network.network().octets().to_vec(),
-            end_addr: network.broadcast().octets().to_vec(),
-        }],
-    }
-    .to_bytes();
+    let mut tsi = vec![TrafficSelector::ipv4_host(assigned_ip)];
+    tsi.extend(output_subnets.iter().copied().map(selector_for_subnet));
+    let tsi = TrafficSelectors { selectors: tsi }.to_bytes();
+    let mut tsr = vec![selector_for_subnet(network)];
+    tsr.extend(
+        input_routes
+            .iter()
+            .map(|route| selector_for_subnet(route.subnet)),
+    );
+    let tsr = TrafficSelectors { selectors: tsr }.to_bytes();
     let mut decoded = Vec::new();
     for payload in payloads(first, &inner) {
         let payload = payload.map_err(anyhow::Error::msg)?;
         decoded.push((
             payload.payload_type,
-            if payload.payload_type == PayloadType::TrafficSelectorResponder {
-                selector.clone()
-            } else {
-                payload.data.to_vec()
+            match payload.payload_type {
+                PayloadType::TrafficSelectorInitiator => tsi.clone(),
+                PayloadType::TrafficSelectorResponder => tsr.clone(),
+                PayloadType::Configuration => {
+                    let mut configuration =
+                        Configuration::parse(payload.data).map_err(anyhow::Error::msg)?;
+                    configuration
+                        .attrs
+                        .retain(|attr| attr.attr_type != ryke::config_attr::INTERNAL_IP4_SUBNET);
+                    configuration.attrs.extend(input_routes.iter().map(|route| {
+                        let mut value = route.subnet.network().octets().to_vec();
+                        value.extend_from_slice(&route.subnet.netmask().octets());
+                        ConfigAttr {
+                            attr_type: ryke::config_attr::INTERNAL_IP4_SUBNET,
+                            value,
+                        }
+                    }));
+                    configuration.to_bytes()
+                }
+                _ => payload.data.to_vec(),
             },
         ));
     }
@@ -1586,6 +1636,11 @@ mod tests {
                 ClientType::Ikev2,
                 Some("password".to_string()),
                 Some("Alice's device".to_string()),
+                Some(vec!["192.168.44.7/24".parse().unwrap()]),
+                Some(vec![crate::server::control_server::db::Ikev2InputRoute {
+                    subnet: "172.20.5.9/24".parse().unwrap(),
+                    target_ip: "10.78.0.20".parse().unwrap(),
+                }]),
             )
             .await
             .unwrap();
@@ -1719,6 +1774,41 @@ mod tests {
                         })
                         .unwrap();
                     assert_eq!(selected.proposals[0].num, 2);
+                    let tsi = payloads(first, &inner)
+                        .find_map(|payload| {
+                            let payload = payload.ok()?;
+                            (payload.payload_type == PayloadType::TrafficSelectorInitiator)
+                                .then(|| TrafficSelectors::parse(payload.data).unwrap())
+                        })
+                        .unwrap();
+                    assert_eq!(tsi.selectors.len(), 2);
+                    assert_eq!(tsi.selectors[0].start_addr, vec![10, 78, 0, 8]);
+                    assert_eq!(tsi.selectors[0].end_addr, vec![10, 78, 0, 8]);
+                    assert_eq!(tsi.selectors[1].start_addr, vec![192, 168, 44, 0]);
+                    assert_eq!(tsi.selectors[1].end_addr, vec![192, 168, 44, 255]);
+                    let tsr = payloads(first, &inner)
+                        .find_map(|payload| {
+                            let payload = payload.ok()?;
+                            (payload.payload_type == PayloadType::TrafficSelectorResponder)
+                                .then(|| TrafficSelectors::parse(payload.data).unwrap())
+                        })
+                        .unwrap();
+                    assert_eq!(tsr.selectors.len(), 2);
+                    assert_eq!(tsr.selectors[0].start_addr, vec![10, 78, 0, 0]);
+                    assert_eq!(tsr.selectors[0].end_addr, vec![10, 78, 0, 255]);
+                    assert_eq!(tsr.selectors[1].start_addr, vec![172, 20, 5, 0]);
+                    assert_eq!(tsr.selectors[1].end_addr, vec![172, 20, 5, 255]);
+                    let configuration = payloads(first, &inner)
+                        .find_map(|payload| {
+                            let payload = payload.ok()?;
+                            (payload.payload_type == PayloadType::Configuration)
+                                .then(|| Configuration::parse(payload.data).unwrap())
+                        })
+                        .unwrap();
+                    assert!(configuration.attrs.iter().any(|attr| {
+                        attr.attr_type == ryke::config_attr::INTERNAL_IP4_SUBNET
+                            && attr.value == vec![172, 20, 5, 0, 255, 255, 255, 0]
+                    }));
                     established = true;
                     break;
                 }

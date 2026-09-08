@@ -1,7 +1,7 @@
 use crate::protocol::control_message::RegRequestMsg;
 use crate::server::control_server::db;
 use crate::server::control_server::db::DeviceRecord;
-use crate::server::control_server::db::{ClientType, DeviceIpType};
+use crate::server::control_server::db::{ClientType, DeviceIpType, Ikev2InputRoute};
 use anyhow::bail;
 use bytes::Bytes;
 use dashmap::DashMap;
@@ -104,6 +104,7 @@ pub struct DeviceEntry {
     pub latency_ms: Option<u32>,
     pub traffic_stats: Arc<TrafficStats>,
     pub advertised_subnets: Vec<Ipv4Net>,
+    pub ikev2_input_routes: Vec<Ikev2InputRoute>,
     pub subnet_advertisement_active: bool,
 }
 
@@ -144,7 +145,8 @@ impl DeviceEntry {
             key_sign: None,
             latency_ms: None,
             traffic_stats,
-            advertised_subnets: Vec::new(),
+            advertised_subnets: record.ikev2_output_subnets,
+            ikev2_input_routes: record.ikev2_input_routes,
             subnet_advertisement_active: false,
         }
     }
@@ -157,6 +159,16 @@ impl DeviceEntry {
             ip_type: self.ip_type,
             client_type: self.client_type,
             ikev2_password: self.ikev2_password.clone(),
+            ikev2_output_subnets: if self.client_type == ClientType::Ikev2 {
+                self.advertised_subnets.clone()
+            } else {
+                Vec::new()
+            },
+            ikev2_input_routes: if self.client_type == ClientType::Ikev2 {
+                self.ikev2_input_routes.clone()
+            } else {
+                Vec::new()
+            },
             wireguard_private_key: self.wireguard_private_key.clone(),
             wireguard_public_key: self.wireguard_public_key.clone(),
             device_name: self.device_name.clone(),
@@ -195,6 +207,9 @@ impl NetworkState {
     }
     pub fn net_prefix_len(&self) -> u8 {
         self.net.prefix_len()
+    }
+    pub fn network_contains(&self, ip: Ipv4Addr) -> bool {
+        self.net.contains(&ip)
     }
 
     pub fn sender_map(&self) -> &DashMap<Ipv4Addr, Sender<Bytes>> {
@@ -396,6 +411,8 @@ impl NetworkState {
         ikev2_password: Option<String>,
         wireguard_private_key: Option<String>,
         wireguard_public_key: Option<String>,
+        ikev2_output_subnets: Vec<Ipv4Net>,
+        ikev2_input_routes: Vec<Ikev2InputRoute>,
     ) -> anyhow::Result<Option<DeviceEntry>> {
         let mut guard = self.lease_state.lock();
         guard.validate_ip_available(ip, Some(device_id))?;
@@ -437,6 +454,8 @@ impl NetworkState {
                 entry.wireguard_private_key = wireguard_private_key;
                 entry.wireguard_public_key = wireguard_public_key;
             }
+            entry.advertised_subnets = ikev2_output_subnets;
+            entry.ikev2_input_routes = ikev2_input_routes;
             entry.data_version = data_version;
         } else {
             guard.device_map.insert(
@@ -461,7 +480,8 @@ impl NetworkState {
                     key_sign: None,
                     latency_ms: None,
                     traffic_stats: Arc::new(TrafficStats::new()),
-                    advertised_subnets: Vec::new(),
+                    advertised_subnets: ikev2_output_subnets,
+                    ikev2_input_routes,
                     subnet_advertisement_active: false,
                 },
             );
@@ -574,6 +594,21 @@ impl NetworkState {
             .filter(|entry| entry.is_connected && entry.subnet_advertisement_active)
             .filter_map(|entry| entry.ip.map(|ip| (ip, entry.advertised_subnets.clone())))
             .collect()
+    }
+
+    pub fn active_advertised_subnets(&self, ip: Ipv4Addr) -> Option<Vec<Ipv4Net>> {
+        self.get_device_entry_by_ip(ip)
+            .filter(|entry| entry.is_connected && entry.subnet_advertisement_active)
+            .map(|entry| entry.advertised_subnets)
+    }
+
+    pub fn ikev2_input_target(&self, device_id: &str, destination: Ipv4Addr) -> Option<Ipv4Addr> {
+        self.get_device_entry(device_id)?
+            .ikev2_input_routes
+            .into_iter()
+            .filter(|route| route.subnet.contains(&destination))
+            .max_by_key(|route| route.subnet.prefix_len())
+            .map(|route| route.target_ip)
     }
 
     /// 返回 (分配的IP, 旧IP, DeviceEntry克隆)
@@ -695,6 +730,16 @@ impl NetworkState {
                 server_addr: None,
                 advertised_subnets: if entry.subnet_advertisement_active {
                     entry.advertised_subnets.clone()
+                } else {
+                    Vec::new()
+                },
+                ikev2_output_subnets: if entry.client_type == ClientType::Ikev2 {
+                    entry.advertised_subnets.clone()
+                } else {
+                    Vec::new()
+                },
+                ikev2_input_routes: if entry.client_type == ClientType::Ikev2 {
+                    entry.ikev2_input_routes.clone()
                 } else {
                     Vec::new()
                 },
@@ -1117,6 +1162,7 @@ impl NetworkStateInner {
                         latency_ms: None,
                         traffic_stats: Arc::new(TrafficStats::new()),
                         advertised_subnets: advertised_subnets.clone(),
+                        ikev2_input_routes: Vec::new(),
                         subnet_advertisement_active,
                     }
                 };
@@ -1173,6 +1219,7 @@ impl NetworkStateInner {
                 latency_ms: None,
                 traffic_stats: Arc::new(TrafficStats::new()),
                 advertised_subnets,
+                ikev2_input_routes: Vec::new(),
                 subnet_advertisement_active,
             }
         };

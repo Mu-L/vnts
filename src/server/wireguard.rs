@@ -747,6 +747,8 @@ mod tests {
                 ClientType::Wireguard,
                 None,
                 Some("WG peer".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();

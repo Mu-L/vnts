@@ -28,7 +28,7 @@ import SpeedChart from '@/components/SpeedChart.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { useDeviceMonitor, type DeviceGroup } from '@/composables/useDeviceMonitor'
 import { useToast } from '@/composables/useToast'
-import type { ClientType, DeviceInfo, DeviceIpType, NetworkInfo } from '@/types'
+import type { ClientType, DeviceInfo, DeviceIpType, Ikev2InputRoute, NetworkInfo } from '@/types'
 import { copyText } from '@/utils/clipboard'
 import { formatBytes, formatSpeed } from '@/utils/format'
 
@@ -84,6 +84,8 @@ const deviceForm = ref({
   ip_type: 'Dynamic' as DeviceIpType,
   client_type: 'VNT' as ClientType,
   ikev2_password: '',
+  ikev2_output_subnets: [] as string[],
+  ikev2_input_routes: [] as Ikev2InputRoute[],
 })
 const showIkev2Password = ref(false)
 
@@ -169,8 +171,18 @@ function changeClientType() {
     generatePassword()
   } else {
     deviceForm.value.ikev2_password = ''
+    deviceForm.value.ikev2_output_subnets = []
+    deviceForm.value.ikev2_input_routes = []
     showIkev2Password.value = false
   }
+}
+
+function addOutputSubnet() {
+  deviceForm.value.ikev2_output_subnets.push('')
+}
+
+function addInputRoute() {
+  deviceForm.value.ikev2_input_routes.push({ subnet: '', target_ip: '' })
 }
 
 async function copyCredential(value: string) {
@@ -185,7 +197,16 @@ async function copyCredential(value: string) {
 
 function openCreateDevice() {
   editingDevice.value = null
-  deviceForm.value = { device_id: '', device_name: '', ip: '', ip_type: 'Dynamic', client_type: 'VNT', ikev2_password: '' }
+  deviceForm.value = {
+    device_id: '',
+    device_name: '',
+    ip: '',
+    ip_type: 'Dynamic',
+    client_type: 'VNT',
+    ikev2_password: '',
+    ikev2_output_subnets: [],
+    ikev2_input_routes: [],
+  }
   generateDeviceId()
   showIkev2Password.value = false
   showDeviceModal.value = true
@@ -214,6 +235,8 @@ function openEditDevice(group: DeviceGroup) {
     ip_type: device.ip_type ?? 'Dynamic',
     client_type: device.client_type,
     ikev2_password: '',
+    ikev2_output_subnets: [...(device.ikev2_output_subnets ?? [])],
+    ikev2_input_routes: (device.ikev2_input_routes ?? []).map((route) => ({ ...route })),
   }
   showIkev2Password.value = false
   showDeviceModal.value = true
@@ -232,6 +255,15 @@ async function submitDevice() {
         ...(deviceForm.value.client_type === 'IKEV2' && deviceForm.value.ikev2_password
           ? { ikev2_password: deviceForm.value.ikev2_password }
           : {}),
+        ...(deviceForm.value.client_type === 'IKEV2'
+          ? {
+              ikev2_output_subnets: deviceForm.value.ikev2_output_subnets.map((subnet) => subnet.trim()).filter(Boolean),
+              ikev2_input_routes: deviceForm.value.ikev2_input_routes.map((route) => ({
+                subnet: route.subnet.trim(),
+                target_ip: route.target_ip.trim(),
+              })),
+            }
+          : {}),
       })
     } else {
       await deviceApi.add({
@@ -242,7 +274,14 @@ async function submitDevice() {
         ip_type: deviceForm.value.ip_type,
         client_type: deviceForm.value.client_type,
         ...(deviceForm.value.client_type === 'IKEV2'
-          ? { ikev2_password: deviceForm.value.ikev2_password }
+          ? {
+              ikev2_password: deviceForm.value.ikev2_password,
+              ikev2_output_subnets: deviceForm.value.ikev2_output_subnets.map((subnet) => subnet.trim()).filter(Boolean),
+              ikev2_input_routes: deviceForm.value.ikev2_input_routes.map((route) => ({
+                subnet: route.subnet.trim(),
+                target_ip: route.target_ip.trim(),
+              })),
+            }
           : {}),
       })
     }
@@ -595,6 +634,33 @@ async function executeDelete() {
             </div>
             <button type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" title="生成新密码" @click="generatePassword"><RefreshCw :size="15" /></button>
             <button type="button" class="rounded-lg border border-slate-200 px-3 text-slate-500 hover:text-cyan-600 dark:border-slate-600" title="复制密码" :disabled="!deviceForm.ikev2_password" @click="copyCredential(deviceForm.ikev2_password)"><Clipboard :size="15" /></button>
+          </div>
+        </div>
+        <div v-if="deviceForm.client_type === 'IKEV2'" class="space-y-2">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <label class="block text-sm font-medium text-slate-700 dark:text-slate-300">出口子网</label>
+              <p class="mt-0.5 text-xs text-slate-400">该 IKEv2 设备后方可达的 IPv4 CIDR。</p>
+            </div>
+            <button type="button" class="flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:text-cyan-600 dark:border-slate-600 dark:text-slate-300" @click="addOutputSubnet"><Plus :size="14" />添加</button>
+          </div>
+          <div v-for="(_, index) in deviceForm.ikev2_output_subnets" :key="`output-${index}`" class="flex gap-2">
+            <input v-model.trim="deviceForm.ikev2_output_subnets[index]" type="text" :class="inputClass" placeholder="例如：192.168.10.0/24" required />
+            <button type="button" class="rounded-lg border border-slate-200 px-3 text-slate-400 hover:text-red-500 dark:border-slate-600" title="删除出口子网" @click="deviceForm.ikev2_output_subnets.splice(index, 1)"><Trash2 :size="15" /></button>
+          </div>
+        </div>
+        <div v-if="deviceForm.client_type === 'IKEV2'" class="space-y-2">
+          <div class="flex items-center justify-between gap-3">
+            <div>
+              <label class="block text-sm font-medium text-slate-700 dark:text-slate-300">入口路由</label>
+              <p class="mt-0.5 text-xs text-slate-400">把目标子网流量交给指定的 VNT 虚拟 IP。</p>
+            </div>
+            <button type="button" class="flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs text-slate-600 hover:text-cyan-600 dark:border-slate-600 dark:text-slate-300" @click="addInputRoute"><Plus :size="14" />添加</button>
+          </div>
+          <div v-for="(route, index) in deviceForm.ikev2_input_routes" :key="`input-${index}`" class="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
+            <input v-model.trim="route.subnet" type="text" :class="inputClass" placeholder="目标 CIDR" required />
+            <input v-model.trim="route.target_ip" type="text" :class="inputClass" placeholder="目标 VNT IP" required />
+            <button type="button" class="rounded-lg border border-slate-200 px-3 text-slate-400 hover:text-red-500 dark:border-slate-600" title="删除入口路由" @click="deviceForm.ikev2_input_routes.splice(index, 1)"><Trash2 :size="15" /></button>
           </div>
         </div>
         <div>

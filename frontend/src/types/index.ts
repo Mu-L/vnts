@@ -13,6 +13,11 @@ export type NetworkType = 'Public' | 'Private'
 export type DeviceIpType = 'Dynamic' | 'Static' | 'Fixed'
 export type ClientType = 'VNT' | 'IKEV2' | 'WIREGUARD'
 
+export interface Ikev2InputRoute {
+  subnet: string
+  target_ip: string
+}
+
 export interface NetworkInfo {
   network_code: string
   gateway: string
@@ -41,6 +46,8 @@ export interface DeviceInfo {
   latency_ms: number | null
   server_addr: string | null
   advertised_subnets: string[]
+  ikev2_output_subnets: string[]
+  ikev2_input_routes: Ikev2InputRoute[]
   tx_bytes: number
   rx_bytes: number
   /** 前端基于两次轮询差分计算出的瞬时网速 */
@@ -71,6 +78,8 @@ export interface CreateDevicePayload {
   ip_type?: DeviceIpType
   client_type: ClientType
   ikev2_password?: string
+  ikev2_output_subnets?: string[]
+  ikev2_input_routes?: Ikev2InputRoute[]
 }
 
 export interface UpdateDevicePayload {
@@ -79,6 +88,8 @@ export interface UpdateDevicePayload {
   ip: string
   ip_type: DeviceIpType
   ikev2_password?: string
+  ikev2_output_subnets?: string[]
+  ikev2_input_routes?: Ikev2InputRoute[]
 }
 
 export interface PeerServerInfo {

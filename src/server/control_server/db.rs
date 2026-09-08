@@ -2,8 +2,11 @@ use anyhow::Context;
 use futures::TryStreamExt;
 use ipnet::Ipv4Net;
 use once_cell::sync::OnceCell;
-use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Row, SqlitePool, sqlite::SqlitePoolOptions};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sqlx::{
+    FromRow, Row, SqlitePool,
+    sqlite::{SqlitePoolOptions, SqliteRow},
+};
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::path::Path;
@@ -141,6 +144,8 @@ pub struct DeviceRecord {
     pub ip_type: DeviceIpType,
     pub client_type: ClientType,
     pub ikev2_password: Option<String>,
+    pub ikev2_output_subnets: Vec<Ipv4Net>,
+    pub ikev2_input_routes: Vec<Ikev2InputRoute>,
     pub wireguard_private_key: Option<String>,
     pub wireguard_public_key: Option<String>,
     pub device_name: String,
@@ -148,6 +153,20 @@ pub struct DeviceRecord {
     pub last_connect_time: i64,
     pub tx_bytes: i64,
     pub rx_bytes: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ikev2InputRoute {
+    pub subnet: Ipv4Net,
+    pub target_ip: Ipv4Addr,
+}
+
+fn decode_json_column<T: DeserializeOwned>(
+    row: &SqliteRow,
+    column: &str,
+) -> Result<T, sqlx::Error> {
+    let value: String = row.try_get(column)?;
+    serde_json::from_str(&value).map_err(|error| sqlx::Error::Decode(Box::new(error)))
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -202,6 +221,8 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
             ip_type INTEGER NOT NULL DEFAULT 0,
             client_type INTEGER NOT NULL DEFAULT 0,
             ikev2_password TEXT,
+            ikev2_output_subnets TEXT NOT NULL DEFAULT '[]',
+            ikev2_input_routes TEXT NOT NULL DEFAULT '[]',
             wireguard_private_key TEXT,
             wireguard_public_key TEXT,
             device_name TEXT NOT NULL,
@@ -225,6 +246,15 @@ pub async fn init_db_pool() -> anyhow::Result<()> {
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN ikev2_password TEXT")
         .execute(&pool)
         .await;
+    let _ = sqlx::query(
+        "ALTER TABLE devices ADD COLUMN ikev2_output_subnets TEXT NOT NULL DEFAULT '[]'",
+    )
+    .execute(&pool)
+    .await;
+    let _ =
+        sqlx::query("ALTER TABLE devices ADD COLUMN ikev2_input_routes TEXT NOT NULL DEFAULT '[]'")
+            .execute(&pool)
+            .await;
     let _ = sqlx::query("ALTER TABLE devices ADD COLUMN wireguard_private_key TEXT")
         .execute(&pool)
         .await;
@@ -463,13 +493,15 @@ pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> 
     };
 
     sqlx::query(
-        r#"INSERT INTO devices (device_id, network_code, ip, ip_type, client_type, ikev2_password, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time, tx_bytes, rx_bytes)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        r#"INSERT INTO devices (device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time, tx_bytes, rx_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(device_id, network_code) DO UPDATE SET
                ip = excluded.ip,
                ip_type = excluded.ip_type,
                client_type = excluded.client_type,
                ikev2_password = excluded.ikev2_password,
+               ikev2_output_subnets = excluded.ikev2_output_subnets,
+               ikev2_input_routes = excluded.ikev2_input_routes,
                wireguard_private_key = excluded.wireguard_private_key,
                wireguard_public_key = excluded.wireguard_public_key,
                device_name = excluded.device_name,
@@ -484,6 +516,8 @@ pub async fn save_or_update_device(device: &DeviceRecord) -> anyhow::Result<()> 
     .bind(device.ip_type as i32)
     .bind(device.client_type as i32)
     .bind(&device.ikev2_password)
+    .bind(serde_json::to_string(&device.ikev2_output_subnets)?)
+    .bind(serde_json::to_string(&device.ikev2_input_routes)?)
     .bind(&device.wireguard_private_key)
     .bind(&device.wireguard_public_key)
     .bind(&device.device_name)
@@ -524,7 +558,7 @@ pub async fn get_device(
     };
 
     let row_option = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE network_code = ? AND device_id = ?"#,
     )
@@ -542,6 +576,8 @@ pub async fn get_device(
             ip_type: DeviceIpType::from_i32(row.get("ip_type")),
             client_type: ClientType::from_i32(row.get("client_type")),
             ikev2_password: row.get("ikev2_password"),
+            ikev2_output_subnets: decode_json_column(&row, "ikev2_output_subnets")?,
+            ikev2_input_routes: decode_json_column(&row, "ikev2_input_routes")?,
             wireguard_private_key: row.get("wireguard_private_key"),
             wireguard_public_key: row.get("wireguard_public_key"),
             device_name: row.get("device_name"),
@@ -560,7 +596,7 @@ pub async fn load_all_devices(network_code: &str) -> anyhow::Result<Vec<DeviceRe
     };
 
     let records: Vec<DeviceRecord> = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE network_code = ?"#,
     )
@@ -574,6 +610,8 @@ pub async fn load_all_devices(network_code: &str) -> anyhow::Result<Vec<DeviceRe
             ip_type: DeviceIpType::from_i32(row.try_get("ip_type")?),
             client_type: ClientType::from_i32(row.try_get("client_type")?),
             ikev2_password: row.try_get("ikev2_password")?,
+            ikev2_output_subnets: decode_json_column(&row, "ikev2_output_subnets")?,
+            ikev2_input_routes: decode_json_column(&row, "ikev2_input_routes")?,
             wireguard_private_key: row.try_get("wireguard_private_key")?,
             wireguard_public_key: row.try_get("wireguard_public_key")?,
             device_name: row.try_get("device_name")?,
@@ -595,7 +633,7 @@ pub async fn load_all_ikev2_devices() -> anyhow::Result<Vec<DeviceRecord>> {
         return Ok(Vec::new());
     };
     let rows = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE client_type = 1"#,
     )
@@ -611,6 +649,8 @@ pub async fn load_all_ikev2_devices() -> anyhow::Result<Vec<DeviceRecord>> {
                 ip_type: DeviceIpType::from_i32(row.try_get("ip_type")?),
                 client_type: ClientType::from_i32(row.try_get("client_type")?),
                 ikev2_password: row.try_get("ikev2_password")?,
+                ikev2_output_subnets: decode_json_column(&row, "ikev2_output_subnets")?,
+                ikev2_input_routes: decode_json_column(&row, "ikev2_input_routes")?,
                 wireguard_private_key: row.try_get("wireguard_private_key")?,
                 wireguard_public_key: row.try_get("wireguard_public_key")?,
                 device_name: row.try_get("device_name")?,
@@ -629,7 +669,7 @@ pub async fn load_all_wireguard_devices() -> anyhow::Result<Vec<DeviceRecord>> {
         return Ok(Vec::new());
     };
     let rows = sqlx::query(
-        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
+        r#"SELECT device_id, network_code, ip, ip_type, client_type, ikev2_password, ikev2_output_subnets, ikev2_input_routes, wireguard_private_key, wireguard_public_key, device_name, device_version, last_connect_time,
            COALESCE(tx_bytes, 0) as tx_bytes, COALESCE(rx_bytes, 0) as rx_bytes
            FROM devices WHERE client_type = 2"#,
     )
@@ -645,6 +685,8 @@ pub async fn load_all_wireguard_devices() -> anyhow::Result<Vec<DeviceRecord>> {
                 ip_type: DeviceIpType::from_i32(row.try_get("ip_type")?),
                 client_type: ClientType::from_i32(row.try_get("client_type")?),
                 ikev2_password: row.try_get("ikev2_password")?,
+                ikev2_output_subnets: decode_json_column(&row, "ikev2_output_subnets")?,
+                ikev2_input_routes: decode_json_column(&row, "ikev2_input_routes")?,
                 wireguard_private_key: row.try_get("wireguard_private_key")?,
                 wireguard_public_key: row.try_get("wireguard_public_key")?,
                 device_name: row.try_get("device_name")?,

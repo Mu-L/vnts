@@ -1,5 +1,5 @@
 use crate::ControlService;
-use crate::server::control_server::db::{ClientType, DeviceIpType, NetworkType};
+use crate::server::control_server::db::{ClientType, DeviceIpType, Ikev2InputRoute, NetworkType};
 use crate::server::control_server::service::{DeviceInfoVO, NetworkInfoVO};
 use crate::utils::config::{
     Ikev2Config, WireGuardConfig, load_ikev2_config, load_wireguard_config,
@@ -1162,6 +1162,10 @@ struct CreateDeviceRequest {
     #[serde(default)]
     client_type: ClientType,
     ikev2_password: Option<String>,
+    #[serde(default)]
+    ikev2_output_subnets: Vec<ipnet::Ipv4Net>,
+    #[serde(default)]
+    ikev2_input_routes: Vec<Ikev2InputRoute>,
 }
 
 async fn create_device(
@@ -1182,6 +1186,8 @@ async fn create_device(
             body.client_type,
             body.ikev2_password,
             body.device_name,
+            Some(body.ikev2_output_subnets),
+            Some(body.ikev2_input_routes),
         )
         .await
     {
@@ -1197,6 +1203,8 @@ struct UpdateDeviceRequest {
     ip: String,
     ip_type: DeviceIpType,
     ikev2_password: Option<String>,
+    ikev2_output_subnets: Option<Vec<ipnet::Ipv4Net>>,
+    ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
 }
 
 async fn update_device(
@@ -1217,6 +1225,8 @@ async fn update_device(
             body.ip_type,
             body.ikev2_password,
             body.device_name,
+            body.ikev2_output_subnets,
+            body.ikev2_input_routes,
         )
         .await
     {
@@ -1446,7 +1456,7 @@ mod tests {
     use super::{
         AppState, AuthConfig, Claims, build_app, normalize_network_codes, safe_static_path,
     };
-    use crate::server::control_server::db::{ClientType, DeviceIpType};
+    use crate::server::control_server::db::{ClientType, DeviceIpType, Ikev2InputRoute};
     use crate::server::control_server::service::ControlService;
     use crate::utils::config::{Ikev2Config, update_ikev2_config};
     use axum::body::{Body, to_bytes};
@@ -1634,6 +1644,11 @@ mod tests {
                 ClientType::Ikev2,
                 Some("private-password".to_string()),
                 Some("Alice's device".to_string()),
+                Some(vec!["192.168.88.0/24".parse().unwrap()]),
+                Some(vec![Ikev2InputRoute {
+                    subnet: "172.20.0.0/16".parse().unwrap(),
+                    target_ip: "10.60.0.20".parse().unwrap(),
+                }]),
             )
             .await
             .unwrap();
@@ -1672,11 +1687,12 @@ mod tests {
             .await
             .unwrap();
         let list_body = to_bytes(list.into_body(), usize::MAX).await.unwrap();
-        assert!(
-            !String::from_utf8(list_body.to_vec())
-                .unwrap()
-                .contains("private-password")
-        );
+        let list_body = String::from_utf8(list_body.to_vec()).unwrap();
+        assert!(!list_body.contains("private-password"));
+        assert!(list_body.contains("\"ikev2_output_subnets\":[\"192.168.88.0/24\"]"));
+        assert!(list_body.contains(
+            "\"ikev2_input_routes\":[{\"subnet\":\"172.20.0.0/16\",\"target_ip\":\"10.60.0.20\"}]"
+        ));
 
         let access = app
             .oneshot(
@@ -1732,6 +1748,8 @@ persistent_keepalive = 25
                 ClientType::Wireguard,
                 None,
                 Some("Alice WG".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();

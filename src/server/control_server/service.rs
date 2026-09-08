@@ -1,7 +1,7 @@
 use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
 use crate::server::control_server::db;
 use crate::server::control_server::db::{
-    ClientType, DeviceIpType, NetworkRecord, NetworkSource, NetworkType,
+    ClientType, DeviceIpType, Ikev2InputRoute, NetworkRecord, NetworkSource, NetworkType,
 };
 use crate::server::network_state_provider::{
     NetworkState, NetworkStateProvider, i64_to_system_time,
@@ -379,10 +379,9 @@ impl ControlService {
         let state = self
             .get_or_create_network_state(network_code.clone(), config)
             .await;
-        let device_name = state
+        let device = state
             .get_device_entry(&device_id)
             .filter(|entry| entry.client_type == ClientType::Ikev2)
-            .map(|entry| entry.device_name)
             .with_context(|| format!("IKEv2 设备 '{}' 未由管理员预先创建", device_id))?;
         let remote_ips = self
             .get_peer_manager()
@@ -397,13 +396,13 @@ impl ControlService {
             network_code: network_code.clone(),
             device_id,
             ip: Some(requested_ip),
-            name: device_name,
+            name: device.device_name,
             version: "IKEv2".to_string(),
             key_sign: None,
             ip_variable: false,
             server_id: 0,
             registration_mode: RegistrationMode::Normal,
-            advertised_subnets: Vec::new(),
+            advertised_subnets: device.advertised_subnets,
             allow_ikev2: true,
             allow_wireguard: true,
         };
@@ -809,6 +808,8 @@ impl ControlService {
         ip_type: DeviceIpType,
         ikev2_password: Option<String>,
         device_name: Option<String>,
+        ikev2_output_subnets: Option<Vec<Ipv4Net>>,
+        ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
         mutation: DeviceMutation,
     ) -> anyhow::Result<()> {
         if device_id.is_empty()
@@ -851,6 +852,65 @@ impl ControlService {
                 .as_ref()
                 .map(|entry| entry.client_type)
                 .context("设备不存在")?,
+        };
+        let (ikev2_output_subnets, ikev2_input_routes) = if client_type == ClientType::Ikev2 {
+            let mut output_subnets = ikev2_output_subnets
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .map(|entry| entry.advertised_subnets.clone())
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .map(|subnet| subnet.trunc())
+                .collect::<Vec<_>>();
+            output_subnets.sort_by_key(|net| (u32::from(net.network()), net.prefix_len()));
+            output_subnets.dedup();
+            if output_subnets.len() > 254 {
+                bail!("IKEv2 出口子网不能超过 254 条");
+            }
+
+            let mut input_routes = ikev2_input_routes
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .map(|entry| entry.ikev2_input_routes.clone())
+                })
+                .unwrap_or_default();
+            for route in &mut input_routes {
+                route.subnet = route.subnet.trunc();
+                Self::validate_device_ip(config, route.target_ip)?;
+                if route.target_ip == ip {
+                    bail!("IKEv2 入口路由的目标 IP 不能是设备自身 IP");
+                }
+            }
+            input_routes.sort_by_key(|route| {
+                (
+                    std::cmp::Reverse(route.subnet.prefix_len()),
+                    u32::from(route.subnet.network()),
+                )
+            });
+            if input_routes
+                .windows(2)
+                .any(|routes| routes[0].subnet == routes[1].subnet)
+            {
+                bail!("同一 IKEv2 设备不能为相同入口子网配置多个目标 IP");
+            }
+            if input_routes.len() > 254 {
+                bail!("IKEv2 入口路由不能超过 254 条");
+            }
+            (output_subnets, input_routes)
+        } else {
+            if ikev2_output_subnets
+                .as_ref()
+                .is_some_and(|value| !value.is_empty())
+                || ikev2_input_routes
+                    .as_ref()
+                    .is_some_and(|value| !value.is_empty())
+            {
+                bail!("只有 IKEv2 设备可以配置入口或出口子网");
+            }
+            (Vec::new(), Vec::new())
         };
         let password = match client_type {
             ClientType::Vnt => {
@@ -953,6 +1013,8 @@ impl ControlService {
             password,
             wireguard_private_key,
             wireguard_public_key,
+            ikev2_output_subnets,
+            ikev2_input_routes,
         )?;
         let record = state
             .get_device_entry(device_id)
@@ -981,6 +1043,8 @@ impl ControlService {
         client_type: ClientType,
         ikev2_password: Option<String>,
         device_name: Option<String>,
+        ikev2_output_subnets: Option<Vec<Ipv4Net>>,
+        ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -989,6 +1053,8 @@ impl ControlService {
             ip_type,
             ikev2_password,
             device_name,
+            ikev2_output_subnets,
+            ikev2_input_routes,
             DeviceMutation::Create(client_type),
         )
         .await
@@ -1010,10 +1076,13 @@ impl ControlService {
             ClientType::Vnt,
             None,
             None,
+            None,
+            None,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn update_device_with_password(
         &self,
         network_code: &str,
@@ -1022,6 +1091,8 @@ impl ControlService {
         ip_type: DeviceIpType,
         ikev2_password: Option<String>,
         device_name: Option<String>,
+        ikev2_output_subnets: Option<Vec<Ipv4Net>>,
+        ikev2_input_routes: Option<Vec<Ikev2InputRoute>>,
     ) -> anyhow::Result<()> {
         self.upsert_device(
             network_code,
@@ -1030,6 +1101,8 @@ impl ControlService {
             ip_type,
             ikev2_password,
             device_name,
+            ikev2_output_subnets,
+            ikev2_input_routes,
             DeviceMutation::Update,
         )
         .await
@@ -1043,8 +1116,17 @@ impl ControlService {
         ip: Ipv4Addr,
         ip_type: DeviceIpType,
     ) -> anyhow::Result<()> {
-        self.update_device_with_password(network_code, device_id, ip, ip_type, None, None)
-            .await
+        self.update_device_with_password(
+            network_code,
+            device_id,
+            ip,
+            ip_type,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
     }
 
     async fn ikev2_username_exists(&self, username: &str) -> anyhow::Result<bool> {
@@ -1243,21 +1325,61 @@ impl ControlService {
             .and_then(|manager| manager.remote_client_type(network_code, ip))
     }
 
+    pub fn address_owned_by(&self, network_code: &str, owner: Ipv4Addr, address: Ipv4Addr) -> bool {
+        if owner == address {
+            return true;
+        }
+        if self
+            .db_nets
+            .read()
+            .get(network_code)
+            .is_some_and(|config| config.net.contains(&address))
+        {
+            return false;
+        }
+        if let Some(state) = self.get_network_state(network_code)
+            && state
+                .active_advertised_subnets(owner)
+                .is_some_and(|subnets| subnets.iter().any(|subnet| subnet.contains(&address)))
+        {
+            return true;
+        }
+        self.get_peer_manager()
+            .and_then(|manager| manager.remote_advertised_subnets(network_code, owner))
+            .is_some_and(|subnets| subnets.iter().any(|subnet| subnet.contains(&address)))
+    }
+
+    pub fn ikev2_route_target(
+        &self,
+        network_code: &str,
+        device_id: &str,
+        destination: Ipv4Addr,
+    ) -> Option<Ipv4Addr> {
+        let config = self.db_nets.read().get(network_code).copied()?;
+        if config.net.contains(&destination) {
+            return Some(destination);
+        }
+        self.get_network_state(network_code)?
+            .ikev2_input_target(device_id, destination)
+    }
+
     pub async fn forward_ikev2_packet(
         &self,
         network_code: &str,
-        source: Ipv4Addr,
-        destination: Ipv4Addr,
+        device_id: &str,
+        source_id: Ipv4Addr,
         payload: &[u8],
     ) -> anyhow::Result<bool> {
-        self.forward_external_packet(
-            network_code,
-            ClientType::Ikev2,
-            source,
-            destination,
-            payload,
-        )
-        .await
+        use pnet_packet::ipv4::Ipv4Packet;
+        let Some(ipv4) = Ipv4Packet::new(payload) else {
+            return Ok(false);
+        };
+        let destination = ipv4.get_destination();
+        let Some(target) = self.ikev2_route_target(network_code, device_id, destination) else {
+            return Ok(false);
+        };
+        self.forward_external_packet(network_code, ClientType::Ikev2, source_id, target, payload)
+            .await
     }
 
     pub async fn forward_wireguard_packet(
@@ -1295,8 +1417,8 @@ impl ControlService {
         if ipv4.get_version() != 4
             || header_length < Ipv4Packet::minimum_packet_size()
             || ipv4.get_total_length() as usize != payload.len()
-            || ipv4.get_source() != source
-            || ipv4.get_destination() != destination
+            || !self.address_owned_by(network_code, source, ipv4.get_source())
+            || !self.address_owned_by(network_code, destination, ipv4.get_destination())
         {
             return Ok(false);
         }
@@ -1515,6 +1637,8 @@ impl ControlService {
                                 latency_ms: None,
                                 server_addr: None,
                                 advertised_subnets: Vec::new(),
+                                ikev2_output_subnets: r.ikev2_output_subnets,
+                                ikev2_input_routes: r.ikev2_input_routes,
                                 tx_bytes: r.tx_bytes as u64,
                                 rx_bytes: r.rx_bytes as u64,
                                 client_type: r.client_type,
@@ -1546,6 +1670,8 @@ impl ControlService {
                     latency_ms: Some(latency_ms),
                     server_addr: Some(server_addr),
                     advertised_subnets,
+                    ikev2_output_subnets: Vec::new(),
+                    ikev2_input_routes: Vec::new(),
                     tx_bytes: 0,
                     rx_bytes: 0,
                     client_type,
@@ -1614,6 +1740,8 @@ pub struct DeviceInfoVO {
     pub latency_ms: Option<u32>,
     pub server_addr: Option<String>,
     pub advertised_subnets: Vec<Ipv4Net>,
+    pub ikev2_output_subnets: Vec<Ipv4Net>,
+    pub ikev2_input_routes: Vec<Ikev2InputRoute>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub client_type: ClientType,
@@ -1642,7 +1770,9 @@ mod tests {
         ControlService, NetworkConfig, first_usable_ip, network_counts, network_from_gateway,
     };
     use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
-    use crate::server::control_server::db::{ClientType, DeviceIpType, NetworkSource, NetworkType};
+    use crate::server::control_server::db::{
+        ClientType, DeviceIpType, Ikev2InputRoute, NetworkSource, NetworkType,
+    };
     use ipnet::Ipv4Net;
     use std::collections::{HashMap, HashSet};
     use std::net::Ipv4Addr;
@@ -2295,6 +2425,8 @@ mod tests {
                     ClientType::Ikev2,
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .await
                 .is_err()
@@ -2308,6 +2440,8 @@ mod tests {
                 ClientType::Ikev2,
                 Some("old-password".to_string()),
                 Some("Alice Phone".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -2320,6 +2454,8 @@ mod tests {
                     DeviceIpType::Fixed,
                     ClientType::Ikev2,
                     Some("other-password".to_string()),
+                    None,
+                    None,
                     None,
                 )
                 .await
@@ -2349,6 +2485,8 @@ mod tests {
                 DeviceIpType::Static,
                 Some("new-password".to_string()),
                 Some("Alice Tablet".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -2373,6 +2511,8 @@ mod tests {
                 DeviceIpType::Static,
                 None,
                 Some("Alice Laptop".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -2383,6 +2523,135 @@ mod tests {
             .unwrap();
         assert_eq!(record.device_name, "Alice Laptop");
         assert_eq!(record.ikev2_password.as_deref(), Some("new-password"));
+    }
+
+    #[tokio::test]
+    async fn ikev2_subnet_config_is_normalized_routed_and_active_only_while_online() {
+        let service = ControlService::new(
+            "10.96.0.0/24".parse().unwrap(),
+            HashMap::from([("ike-subnets".to_string(), "10.96.0.0/24".parse().unwrap())]),
+            HashSet::new(),
+            Duration::from_secs(3600),
+        )
+        .await
+        .unwrap();
+        let outputs = vec![
+            "192.168.20.7/24".parse().unwrap(),
+            "192.168.20.0/24".parse().unwrap(),
+            "172.16.0.1/16".parse().unwrap(),
+        ];
+        let routes = vec![
+            Ikev2InputRoute {
+                subnet: "10.200.0.7/16".parse().unwrap(),
+                target_ip: "10.96.0.20".parse().unwrap(),
+            },
+            Ikev2InputRoute {
+                subnet: "10.200.10.9/24".parse().unwrap(),
+                target_ip: "10.96.0.21".parse().unwrap(),
+            },
+        ];
+        service
+            .add_device_typed(
+                "ike-subnets",
+                "router",
+                "10.96.0.8".parse().unwrap(),
+                DeviceIpType::Fixed,
+                ClientType::Ikev2,
+                Some("password".to_string()),
+                Some("Branch router".to_string()),
+                Some(outputs),
+                Some(routes),
+            )
+            .await
+            .unwrap();
+
+        let record = service
+            .get_device_record("ike-subnets", "router")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            record.ikev2_output_subnets,
+            vec![
+                "172.16.0.0/16".parse().unwrap(),
+                "192.168.20.0/24".parse().unwrap()
+            ]
+        );
+        assert_eq!(
+            record.ikev2_input_routes[0].subnet,
+            "10.200.10.0/24".parse().unwrap()
+        );
+        assert_eq!(
+            service.ikev2_route_target("ike-subnets", "router", "10.200.10.42".parse().unwrap(),),
+            Some("10.96.0.21".parse().unwrap())
+        );
+        assert_eq!(
+            service.ikev2_route_target("ike-subnets", "router", "10.200.99.42".parse().unwrap(),),
+            Some("10.96.0.20".parse().unwrap())
+        );
+        assert!(!service.address_owned_by(
+            "ike-subnets",
+            "10.96.0.8".parse().unwrap(),
+            "192.168.20.10".parse().unwrap(),
+        ));
+
+        let (sender, _receiver) = mpsc::channel(8);
+        let session = service
+            .register_ikev2("ike-subnets".to_string(), "router".to_string(), sender)
+            .await
+            .unwrap();
+        assert!(service.address_owned_by(
+            "ike-subnets",
+            session.ip,
+            "192.168.20.10".parse().unwrap(),
+        ));
+        assert!(!service.address_owned_by(
+            "ike-subnets",
+            session.ip,
+            "10.96.0.99".parse().unwrap(),
+        ));
+
+        let duplicate = vec![
+            Ikev2InputRoute {
+                subnet: "203.0.113.1/24".parse().unwrap(),
+                target_ip: "10.96.0.20".parse().unwrap(),
+            },
+            Ikev2InputRoute {
+                subnet: "203.0.113.99/24".parse().unwrap(),
+                target_ip: "10.96.0.21".parse().unwrap(),
+            },
+        ];
+        assert!(
+            service
+                .update_device_with_password(
+                    "ike-subnets",
+                    "router",
+                    session.ip,
+                    DeviceIpType::Fixed,
+                    None,
+                    None,
+                    None,
+                    Some(duplicate),
+                )
+                .await
+                .is_err()
+        );
+        assert!(
+            service
+                .add_device_typed(
+                    "ike-subnets",
+                    "plain-vnt",
+                    "10.96.0.9".parse().unwrap(),
+                    DeviceIpType::Fixed,
+                    ClientType::Vnt,
+                    None,
+                    None,
+                    Some(vec!["198.51.100.0/24".parse().unwrap()]),
+                    None,
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2409,6 +2678,8 @@ mod tests {
                 ClientType::Ikev2,
                 Some("password".to_string()),
                 Some("Office Phone".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();
@@ -2453,7 +2724,7 @@ mod tests {
         let packet = test_ipv4(ike.ip, vnt.ip);
         assert!(
             !service
-                .forward_ikev2_packet("ike-access", ike.ip, vnt.ip, &packet)
+                .forward_ikev2_packet("ike-access", "phone", ike.ip, &packet)
                 .await
                 .unwrap()
         );
@@ -2483,6 +2754,8 @@ mod tests {
                 ClientType::Wireguard,
                 None,
                 Some("WireGuard Phone".to_string()),
+                None,
+                None,
             )
             .await
             .unwrap();

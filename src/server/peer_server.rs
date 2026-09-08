@@ -559,13 +559,25 @@ impl PeerServerManager {
                     let Some(ipv4) = pnet_packet::ipv4::Ipv4Packet::new(packet.payload()) else {
                         return;
                     };
+                    let source = Ipv4Addr::from(packet.src_id());
                     let header_length = ipv4.get_header_length() as usize * 4;
                     if !allowed
                         || ipv4.get_version() != 4
                         || header_length < pnet_packet::ipv4::Ipv4Packet::minimum_packet_size()
                         || ipv4.get_total_length() as usize != packet.payload().len()
-                        || ipv4.get_source() != Ipv4Addr::from(packet.src_id())
-                        || ipv4.get_destination() != dest
+                        || (ipv4.get_source() != source
+                            && state.network_contains(ipv4.get_source()))
+                        || !self.remote_address_owned_by(
+                            &forward.network_code,
+                            source,
+                            ipv4.get_source(),
+                        )
+                        || !(ipv4.get_destination() == dest
+                            || (device.subnet_advertisement_active
+                                && device
+                                    .advertised_subnets
+                                    .iter()
+                                    .any(|subnet| subnet.contains(&ipv4.get_destination()))))
                     {
                         return;
                     }
@@ -1054,6 +1066,45 @@ impl PeerServerManager {
             .filter(|route| route.peer_info.is_connected())
             .min_by_key(|route| route.total_latency())
             .map(|route| route.client_type)
+    }
+
+    fn remote_address_owned_by(
+        &self,
+        network_code: &str,
+        owner: Ipv4Addr,
+        address: Ipv4Addr,
+    ) -> bool {
+        if owner == address {
+            return true;
+        }
+        let Some(routes) = self.ip_to_routes.get(network_code) else {
+            return false;
+        };
+        routes.get(&owner).is_some_and(|candidates| {
+            candidates
+                .iter()
+                .filter(|route| route.peer_info.is_connected())
+                .any(|route| {
+                    route
+                        .advertised_subnets
+                        .iter()
+                        .any(|subnet| subnet.contains(&address))
+                })
+        })
+    }
+
+    pub fn remote_advertised_subnets(
+        &self,
+        network_code: &str,
+        ip: Ipv4Addr,
+    ) -> Option<Vec<ipnet::Ipv4Net>> {
+        self.ip_to_routes
+            .get(network_code)?
+            .get(&ip)?
+            .iter()
+            .filter(|route| route.peer_info.is_connected())
+            .min_by_key(|route| route.total_latency())
+            .map(|route| route.advertised_subnets.clone())
     }
 
     pub fn remote_online_ips(&self, network_code: &str) -> std::collections::HashSet<Ipv4Addr> {
