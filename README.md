@@ -1,4 +1,5 @@
 # vnts
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/vnt-dev/vnts)
 
 [vnt](https://github.com/vnt-dev/vnt)的服务端
 
