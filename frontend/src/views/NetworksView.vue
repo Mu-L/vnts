@@ -146,8 +146,7 @@ async function executeDelete() {
     <!-- 页头 -->
     <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div>
-        <h2 class="text-xl font-bold text-slate-900 dark:text-slate-100">网络列表</h2>
-        <p class="mt-0.5 text-sm text-slate-400 dark:text-slate-500">共 {{ networks.length }} 个虚拟网络</p>
+        <p class="text-sm text-slate-400 dark:text-slate-500">共 {{ networks.length }} 个虚拟网络</p>
       </div>
       <div class="flex items-center gap-3">
         <div class="relative w-full sm:w-64">

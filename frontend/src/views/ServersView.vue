@@ -85,8 +85,7 @@ async function executeDelete() {
     <!-- 页头 -->
     <div class="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div>
-        <h2 class="text-xl font-bold text-slate-900 dark:text-slate-100">服务器列表</h2>
-        <p class="mt-0.5 text-sm text-slate-400 dark:text-slate-500">vnt 服务端之间的互联节点</p>
+        <p class="text-sm text-slate-400 dark:text-slate-500">vnt 服务端之间的互联节点</p>
       </div>
       <button
         class="flex shrink-0 items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-sm font-semibold text-white transition hover:bg-blue-700"

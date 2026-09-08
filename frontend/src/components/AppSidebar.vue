@@ -1,22 +1,14 @@
 <script setup lang="ts">
-import { ChevronDown, LogOut, Network, Radio, Server, Settings, ShieldCheck, Waves } from '@lucide/vue'
+import { ChevronDown, Network, Radio, Server, Settings, ShieldCheck, Waves } from '@lucide/vue'
 import { computed } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRoute } from 'vue-router'
 import AppLogo from './AppLogo.vue'
-import { useAuthStore } from '@/composables/useAuth'
 import { useSettingsNavigation } from '@/composables/useSettingsNavigation'
 
-const { username, logout } = useAuthStore()
 const { sectionStates } = useSettingsNavigation()
 const route = useRoute()
-const router = useRouter()
 const settingsActive = computed(() => route.name === 'settings')
 const activeSettingsSection = computed(() => route.query.section === 'ikev2' || route.query.section === 'wireguard' ? route.query.section : 'access-control')
-
-function handleLogout() {
-  logout()
-  router.push({ name: 'login' })
-}
 </script>
 
 <template>
@@ -86,27 +78,6 @@ function handleLogout() {
         </Transition>
       </div>
     </nav>
-
-    <div class="border-t border-slate-100 dark:border-slate-800 p-3">
-      <div class="flex items-center gap-3 rounded-lg bg-slate-50 dark:bg-slate-800/80 px-3 py-2.5">
-        <div
-          class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-blue-100 text-xs font-bold text-blue-700 dark:bg-blue-500/20 dark:text-blue-400"
-        >
-          {{ (username || 'A').charAt(0).toUpperCase() }}
-        </div>
-        <div class="min-w-0 flex-1">
-          <div class="truncate text-sm font-medium text-slate-800 dark:text-slate-200">{{ username || 'Admin' }}</div>
-          <div class="text-[11px] text-slate-400 dark:text-slate-500">管理员</div>
-        </div>
-        <button
-          class="shrink-0 rounded-lg p-1 text-slate-400 transition hover:bg-red-50 hover:text-red-500 dark:text-slate-500 dark:hover:bg-red-500/10 dark:hover:text-red-400"
-          title="退出登录"
-          @click="handleLogout"
-        >
-          <LogOut :size="16" />
-        </button>
-      </div>
-    </div>
   </aside>
 </template>
 
