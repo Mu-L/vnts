@@ -8,7 +8,7 @@ const { isLoggedIn } = useAuthStore()
 </script>
 
 <template>
-  <div class="min-h-screen bg-slate-50 dark:bg-slate-900">
+  <div class="min-h-screen bg-slate-100 dark:bg-slate-900">
     <template v-if="isLoggedIn">
       <div class="flex min-h-screen">
         <AppSidebar />

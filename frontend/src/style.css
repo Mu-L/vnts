@@ -9,12 +9,17 @@
     'Hiragino Sans GB', 'Microsoft YaHei', sans-serif;
 }
 
+/* 浅色主题使用柔和灰白表面；深色主题仍保留标准白色用于文字和控件。 */
+:root:not(.dark) {
+  --color-white: var(--color-slate-50);
+}
+
 html {
-  @apply bg-slate-50 antialiased dark:bg-slate-900;
+  @apply bg-slate-100 antialiased dark:bg-slate-900;
 }
 
 body {
-  @apply bg-slate-50 text-slate-800 dark:bg-slate-900 dark:text-slate-100;
+  @apply bg-slate-100 text-slate-800 dark:bg-slate-900 dark:text-slate-100;
   font-family: var(--font-sans);
 }
 
