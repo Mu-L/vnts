@@ -15,12 +15,16 @@ use rand::RngCore;
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 
 const CHANNEL_CAPACITY: usize = 1024;
 const MAX_PACKET_SIZE: usize = 65_535;
+/// A WireGuard tunnel has no disconnect message.  Treat a peer as offline when it has
+/// not sent us an authenticated packet for this long, rather than waiting for the
+/// much longer cryptographic-session expiration in boringtun.
+const PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
 pub struct WireGuardHandle {
@@ -99,6 +103,7 @@ struct Peer {
     config: PeerConfig,
     address: SocketAddr,
     tunnel: Tunn,
+    last_authenticated_at: Instant,
     _session: Session,
     relay_task: tokio::task::JoinHandle<()>,
     receiver_idx: Option<u32>,
@@ -251,7 +256,14 @@ impl WireGuardService {
             }
             self.address_to_peer.insert(address, public_key);
         }
-        self.process_tunnel_input(public_key, data).await
+        self.process_tunnel_input(public_key, data).await?;
+        // Only refresh liveness after boringtun has successfully authenticated and
+        // processed the packet. Parsing a UDP packet or matching its receiver index
+        // alone must not keep a peer online.
+        if let Some(peer) = self.peers.get_mut(&public_key) {
+            peer.last_authenticated_at = Instant::now();
+        }
+        Ok(())
     }
 
     async fn connect_peer(
@@ -301,6 +313,7 @@ impl WireGuardService {
                 config: peer_config,
                 address,
                 tunnel,
+                last_authenticated_at: Instant::now(),
                 _session: session,
                 relay_task,
                 receiver_idx: None,
@@ -456,7 +469,23 @@ impl WireGuardService {
     }
 
     async fn tick(&mut self) {
+        let now = Instant::now();
         for key in self.peers.keys().copied().collect::<Vec<_>>() {
+            if self
+                .peers
+                .get(&key)
+                .is_some_and(|peer| peer_is_idle(peer.last_authenticated_at, now))
+            {
+                if let Some(peer) = self.peers.get(&key) {
+                    log::info!(
+                        "WireGuard peer idle timeout: network_code={},device_id={}",
+                        peer.config.network_code,
+                        peer.config.device_id
+                    );
+                }
+                self.disconnect_peer(key);
+                continue;
+            }
             let result = {
                 let peer = self.peers.get_mut(&key).unwrap();
                 let mut output = [0u8; MAX_PACKET_SIZE];
@@ -561,6 +590,10 @@ impl WireGuardService {
     }
 }
 
+fn peer_is_idle(last_authenticated_at: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_authenticated_at) >= PEER_IDLE_TIMEOUT
+}
+
 enum TunnelAction {
     Done,
     Expired,
@@ -658,6 +691,20 @@ mod tests {
     use crate::protocol::control_message::{RegRequestMsg, RegistrationMode};
     use crate::server::control_server::db::DeviceIpType;
     use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn peer_is_offline_after_idle_timeout() {
+        let last_authenticated_at = Instant::now();
+
+        assert!(!peer_is_idle(
+            last_authenticated_at,
+            last_authenticated_at + PEER_IDLE_TIMEOUT - Duration::from_secs(1),
+        ));
+        assert!(peer_is_idle(
+            last_authenticated_at,
+            last_authenticated_at + PEER_IDLE_TIMEOUT,
+        ));
+    }
 
     #[tokio::test]
     async fn real_wireguard_handshake_and_gateway_ping_round_trip() {
