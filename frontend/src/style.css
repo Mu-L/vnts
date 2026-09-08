@@ -10,12 +10,23 @@
 }
 
 html {
-  @apply antialiased;
+  @apply bg-slate-50 antialiased dark:bg-slate-900;
 }
 
 body {
-  @apply bg-slate-50 text-slate-800 transition-colors dark:bg-slate-900 dark:text-slate-100;
+  @apply bg-slate-50 text-slate-800 dark:bg-slate-900 dark:text-slate-100;
   font-family: var(--font-sans);
+}
+
+/* 仅在主动切换主题时统一动画，避免平时的交互动画受到影响。 */
+html.theme-transitioning,
+html.theme-transitioning *,
+html.theme-transitioning *::before,
+html.theme-transitioning *::after {
+  transition-property: background-color, border-color, color, fill, stroke, outline-color, text-decoration-color, box-shadow, caret-color, accent-color !important;
+  transition-duration: 160ms !important;
+  transition-delay: 0ms !important;
+  transition-timing-function: ease-in-out !important;
 }
 
 /* 细滚动条 */
