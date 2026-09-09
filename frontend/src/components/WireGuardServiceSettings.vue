@@ -16,7 +16,7 @@ const loadError = ref('')
 const saveError = ref('')
 const info = ref<WireGuardServiceInfo | null>(null)
 const savedSnapshot = ref('')
-const form = reactive({ enabled: false, bind: '0.0.0.0:51820', endpoint: '', persistentKeepalive: 25 })
+const form = reactive({ enabled: false, bind: '[::]:51820', endpoint: '', persistentKeepalive: 25 })
 const inputClass = 'w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm text-slate-800 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:focus:border-blue-500 dark:focus:ring-blue-500/20'
 const secondaryButtonClass = 'inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3.5 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50 disabled:opacity-40 dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700'
 
@@ -97,7 +97,7 @@ onMounted(load)
           <input v-model="form.enabled" type="checkbox" class="h-5 w-5 accent-blue-600" />
         </label>
         <div class="grid gap-4 sm:grid-cols-2">
-          <label><span class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">监听地址</span><input v-model.trim="form.bind" :class="inputClass" placeholder="0.0.0.0:51820" /></label>
+          <label><span class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">监听地址</span><input v-model.trim="form.bind" :class="inputClass" placeholder="[::]:51820" /></label>
           <label><span class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">PersistentKeepalive</span><input v-model.number="form.persistentKeepalive" type="number" min="0" max="65535" :class="inputClass" /></label>
         </div>
           <label><span class="mb-1.5 block text-sm font-medium text-slate-700 dark:text-slate-300">公开 Endpoint</span><div class="flex gap-2"><input v-model.trim="form.endpoint" :class="inputClass" placeholder="vpn.example.com:51820" /><button type="button" :class="secondaryButtonClass" @click="useCurrentHost">使用当前域名</button></div><span class="mt-1.5 block text-xs text-slate-400">填写客户端能够访问的域名/IP 和 UDP 端口。</span></label>
