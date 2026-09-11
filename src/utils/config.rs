@@ -52,7 +52,7 @@ impl Default for WireGuardConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            bind: "0.0.0.0:51820".parse().unwrap(),
+            bind: "[::]:51820".parse().unwrap(),
             endpoint: String::new(),
             private_key: None,
             persistent_keepalive: default_wireguard_keepalive(),
@@ -78,8 +78,8 @@ impl Default for Ikev2Config {
     fn default() -> Self {
         Self {
             enabled: false,
-            ike_bind: "0.0.0.0:500".parse().expect("valid IKE bind default"),
-            natt_bind: "0.0.0.0:4500".parse().expect("valid NAT-T bind default"),
+            ike_bind: "[::]:500".parse().expect("valid IKE bind default"),
+            natt_bind: "[::]:4500".parse().expect("valid NAT-T bind default"),
             server_address: String::new(),
             remote_id: String::new(),
             cert: None,
@@ -91,16 +91,16 @@ impl Default for Ikev2Config {
 impl Default for ConfigFile {
     fn default() -> Self {
         Self {
-            tcp_bind: Some("0.0.0.0:29872".parse().unwrap()),
-            quic_bind: Some("0.0.0.0:29872".parse().unwrap()),
-            ws_bind: Some("0.0.0.0:29872".parse().unwrap()),
+            tcp_bind: Some("[::]:29872".parse().unwrap()),
+            quic_bind: Some("[::]:29872".parse().unwrap()),
+            ws_bind: Some("[::]:29872".parse().unwrap()),
             cert: None,
             key: None,
             network: Ipv4Net::new_assert(Ipv4Addr::new(10, 26, 0, 0), 24),
             custom_nets: Default::default(),
             white_list: Default::default(),
             lease_duration: 24 * 60 * 60,
-            web_bind: Some("0.0.0.0:29871".parse().unwrap()),
+            web_bind: Some("[::]:29871".parse().unwrap()),
             username: Some("admin".to_string()),
             password: Some("admin".to_string()),
             persistence: true,
@@ -442,11 +442,11 @@ fn persist_document(path: &Path, content: String) -> anyhow::Result<()> {
 
 pub fn print_example() {
     let str = r#"# 绑定tcp地址，不写则不启用tcp服务
-tcp_bind = "0.0.0.0:29872"
+tcp_bind = "[::]:29872"
 # 绑定quic地址，不写则不启用quic服务
-quic_bind = "0.0.0.0:29872"
+quic_bind = "[::]:29872"
 # 绑定wss地址，不写则不启用wss服务
-ws_bind = "0.0.0.0:29872"
+ws_bind = "[::]:29872"
 # 默认虚拟网段
 network = "10.26.0.0/24"
 # 网络编号白名单
@@ -454,7 +454,7 @@ white_list = []
 # IP租约时长，单位秒，默认24小时，离线超过这个时间IP就会被回收
 lease_duration = 86400
 # Web管理端绑定地址，不写则不启用web服务
-web_bind = "0.0.0.0:29871"
+web_bind = "[::]:29871"
 # 管理端登录用户名密码
 username = "admin"
 # 管理端登录用户密码
@@ -470,7 +470,7 @@ key = "key.pem"
 
 # 服务端互联配置（可选）
 # 服务端之间通信的UDP端口，不填则不启用服务端互联
-# server_quic_bind = "0.0.0.0:29873"
+# server_quic_bind = "[::]:29873"
 # 其他服务器地址列表
 # peer_servers = ["server1.example.com:29873", "192.168.1.100:29873"]
 # 服务器验证码，用于服务器之间的身份验证
@@ -479,8 +479,8 @@ key = "key.pem"
 # IKEv2/IPsec 接入（可选；启用后通常需要管理员/root权限绑定 500/4500）
 # [ikev2]
 # enabled = true
-# ike_bind = "0.0.0.0:500"
-# natt_bind = "0.0.0.0:4500"
+# ike_bind = "[::]:500"
+# natt_bind = "[::]:4500"
 # server_address = "vpn.example.com" # 客户端实际连接地址
 # remote_id = "vpn.example.com"
 # cert = "ikev2-cert.pem"
@@ -490,7 +490,7 @@ key = "key.pem"
 # WireGuard 接入（可选；使用独立 UDP 监听端口）
 # [wireguard]
 # enabled = true
-# bind = "0.0.0.0:51820"
+# bind = "[::]:51820"
 # endpoint = "vpn.example.com:51820"
 # private_key = "" # 留空时首次启用自动生成
 # persistent_keepalive = 25

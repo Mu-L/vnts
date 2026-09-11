@@ -29,7 +29,7 @@ const saveError = ref('')
 const savedSnapshot = ref('')
 const info = ref<Ikev2ServiceInfo | null>(null)
 const autoCertificate = ref(true)
-const form = reactive({ enabled: false, ikeBind: '0.0.0.0:500', nattBind: '0.0.0.0:4500', serverAddress: '', remoteId: '', dns: '', cert: '', key: '' })
+const form = reactive({ enabled: false, ikeBind: '[::]:500', nattBind: '[::]:4500', serverAddress: '', remoteId: '', dns: '', cert: '', key: '' })
 
 const status = computed(() => {
   if (loadError.value) return { text: '加载失败', tone: 'danger' as const }
@@ -161,8 +161,8 @@ onMounted(load)
       <section class="settings-card" aria-labelledby="listeners-title">
         <div class="section-heading"><div class="section-icon"><Server :size="18" /></div><div><h3 id="listeners-title">监听端口</h3><p>服务端接收 IKE 协商与 NAT-T 数据的地址。</p></div></div>
         <div class="grid gap-5 md:grid-cols-2">
-          <div><label for="ike-bind" class="label">IKE 监听地址</label><input id="ike-bind" v-model="form.ikeBind" class="field" placeholder="0.0.0.0:500" /><p class="hint">防火墙需放行 UDP 500。</p></div>
-          <div><label for="natt-bind" class="label">NAT-T 监听地址</label><input id="natt-bind" v-model="form.nattBind" class="field" placeholder="0.0.0.0:4500" /><p class="hint">防火墙需放行 UDP 4500。</p></div>
+          <div><label for="ike-bind" class="label">IKE 监听地址</label><input id="ike-bind" v-model="form.ikeBind" class="field" placeholder="[::]:500" /><p class="hint">防火墙需放行 UDP 500。</p></div>
+          <div><label for="natt-bind" class="label">NAT-T 监听地址</label><input id="natt-bind" v-model="form.nattBind" class="field" placeholder="[::]:4500" /><p class="hint">防火墙需放行 UDP 4500。</p></div>
         </div>
         <div v-if="usesNonstandardPorts" class="mt-4 flex gap-2 rounded-lg border border-orange-300 bg-orange-50 px-3.5 py-3 text-sm leading-6 text-orange-700 dark:border-orange-500/40 dark:bg-orange-500/10 dark:text-orange-300"><AlertCircle :size="18" class="mt-0.5 shrink-0" /><span>系统内置 VPN 客户端通常无法指定非 UDP 500/4500 端口，建议保持默认端口。</span></div>
       </section>
