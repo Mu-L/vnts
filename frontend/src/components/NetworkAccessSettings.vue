@@ -155,12 +155,18 @@ onMounted(loadSettings)
           <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-blue-50 text-blue-600 dark:bg-blue-500/10 dark:text-blue-400">
             <ShieldCheck :size="21" />
           </div>
-          <div>
-            <h2 id="access-control-title" class="font-semibold text-slate-950 dark:text-white">网络访问控制</h2>
-            <p class="mt-1 text-sm leading-5 text-slate-500 dark:text-slate-400">决定哪些网络编码可以连接到当前服务实例。</p>
+          <div class="min-w-0">
+            <div class="flex flex-wrap items-center gap-2">
+              <h2 id="access-control-title" class="font-semibold text-slate-950 dark:text-white">网络访问控制</h2>
+              <span class="status-pill" :class="`status-${status.tone}`">{{ status.text }}</span>
+            </div>
+            <p class="mt-1 text-sm leading-5 text-slate-500 dark:text-slate-400">只允许指定网络连接当前服务。</p>
+            <details class="help-details mt-2">
+              <summary>如何配置</summary>
+              <p>添加允许连接的网络编码并保存。列表为空时不限制网络编码，现有在线设备不会因修改立即断开。</p>
+            </details>
           </div>
         </div>
-        <span class="status-pill" :class="`status-${status.tone}`">{{ status.text }}</span>
       </div>
     </header>
 
@@ -181,13 +187,11 @@ onMounted(loadSettings)
       </button>
     </div>
 
-    <div v-else class="overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm dark:border-slate-700 dark:bg-slate-800">
-      <div class="border-b border-slate-100 p-5 dark:border-slate-700 sm:p-6">
-        <div class="mb-4 flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-          <span class="step-number">1</span>当前策略
-        </div>
+    <div v-else class="rounded-xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-700 dark:bg-slate-800 sm:p-6">
+      <div>
+        <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100">允许的网络</h3>
         <div
-          class="flex gap-3 rounded-lg border px-4 py-3.5"
+          class="mt-3 flex gap-3 rounded-lg border px-4 py-3"
           :class="codes.length === 0
             ? 'border-amber-200 bg-amber-50/70 dark:border-amber-500/25 dark:bg-amber-500/5'
             : 'border-emerald-200 bg-emerald-50/70 dark:border-emerald-500/25 dark:bg-emerald-500/5'"
@@ -198,15 +202,12 @@ onMounted(loadSettings)
             <p class="text-sm font-semibold text-slate-800 dark:text-slate-200">
               {{ codes.length === 0 ? '允许所有网络连接' : `仅允许列表中的 ${codes.length} 个网络连接` }}
             </p>
-            <p class="mt-1 text-[13px] leading-5 text-slate-500 dark:text-slate-400">保存后立即影响新连接和重连，不会断开当前在线设备。</p>
+            <p class="mt-1 text-sm leading-5 text-slate-500 dark:text-slate-400">{{ codes.length === 0 ? '任何网络编码都可以连接；清空列表时需要再次确认。' : '新连接和重连会按此列表校验。' }}</p>
           </div>
         </div>
       </div>
 
-      <div class="border-b border-slate-100 p-5 dark:border-slate-700 sm:p-6">
-        <div class="mb-4 flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-          <span class="step-number">2</span>添加网络编码
-        </div>
+      <div class="mt-5 border-t border-slate-100 pt-5 dark:border-slate-700">
         <label for="whitelist-code" class="sr-only">网络编码</label>
         <div class="flex flex-col gap-2 sm:flex-row">
           <input
@@ -227,14 +228,17 @@ onMounted(loadSettings)
             <Plus :size="16" />添加
           </button>
         </div>
-        <p class="mt-2 text-[13px] leading-5 text-slate-500 dark:text-slate-400">支持粘贴以逗号或换行分隔的多个编码，单个编码最多 32 字节。</p>
+        <details class="help-details mt-2">
+          <summary>批量添加说明</summary>
+          <p>可以粘贴以逗号或换行分隔的多个编码；单个编码最多 32 字节。</p>
+        </details>
         <div v-if="availableSuggestions.length && !input" class="mt-3 flex flex-wrap items-center gap-2">
-          <span class="text-[13px] text-slate-400 dark:text-slate-500">已有网络：</span>
+          <span class="text-sm text-slate-400 dark:text-slate-500">可快速添加：</span>
           <button
             v-for="code in availableSuggestions.slice(0, 6)"
             :key="code"
             type="button"
-            class="rounded-md bg-slate-100 px-2.5 py-1 text-[13px] font-medium text-slate-600 transition hover:bg-blue-50 hover:text-blue-700 dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-blue-500/10 dark:hover:text-blue-300"
+            class="rounded-md bg-slate-100 px-2.5 py-1 text-sm font-medium text-slate-600 transition hover:bg-blue-50 hover:text-blue-700 dark:bg-slate-700 dark:text-slate-300 dark:hover:bg-blue-500/10 dark:hover:text-blue-300"
             @click="addCode(code)"
           >
             + {{ code }}
@@ -242,19 +246,17 @@ onMounted(loadSettings)
         </div>
       </div>
 
-      <div class="p-5 sm:p-6">
-        <div class="mb-4 flex items-center justify-between gap-3">
-          <div class="flex items-center gap-2 text-sm font-semibold text-slate-900 dark:text-slate-100">
-            <span class="step-number">3</span>允许列表
-          </div>
-          <span class="text-[13px] text-slate-400 dark:text-slate-500">{{ codes.length }} 项</span>
+      <div class="mt-5 border-t border-slate-100 pt-5 dark:border-slate-700">
+        <div class="mb-3 flex items-center justify-between gap-3">
+          <h3 class="text-sm font-semibold text-slate-900 dark:text-slate-100">当前列表</h3>
+          <span class="text-sm text-slate-400 dark:text-slate-500">{{ codes.length }} 项</span>
         </div>
         <div v-if="codes.length === 0" class="rounded-lg border border-dashed border-slate-300 px-4 py-9 text-center dark:border-slate-600">
           <ShieldCheck :size="24" class="mx-auto text-slate-300 dark:text-slate-600" />
           <p class="mt-2 text-sm font-medium text-slate-600 dark:text-slate-300">白名单为空</p>
-          <p class="mt-1 text-[13px] text-slate-400 dark:text-slate-500">当前服务不会按网络编码限制连接。</p>
+          <p class="mt-1 text-sm text-slate-400 dark:text-slate-500">当前服务不会按网络编码限制连接。</p>
         </div>
-        <div v-else class="flex min-h-24 flex-wrap content-start gap-2 rounded-lg border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-600 dark:bg-slate-900/40">
+        <div v-else class="flex max-h-48 min-h-24 flex-wrap content-start gap-2 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50/60 p-3 dark:border-slate-600 dark:bg-slate-900/40" tabindex="0" aria-label="允许的网络编码列表">
           <span v-for="code in codes" :key="code" class="code-chip">
             {{ code }}
             <button type="button" class="rounded p-0.5 transition hover:bg-blue-100 hover:text-blue-900 dark:hover:bg-blue-500/20 dark:hover:text-blue-100" :aria-label="`移除 ${code}`" @click="removeCode(code)">
@@ -292,7 +294,6 @@ onMounted(loadSettings)
 <style scoped>
 @reference "../style.css";
 .field { @apply w-full rounded-lg border border-slate-200 bg-white px-3.5 py-2.5 text-sm text-slate-800 placeholder:text-slate-400 outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-100 dark:border-slate-600 dark:bg-slate-900 dark:text-slate-200 dark:focus:border-blue-500 dark:focus:ring-blue-500/20; }
-.step-number { @apply inline-flex h-5 w-5 items-center justify-center rounded-md bg-slate-100 text-xs font-bold text-slate-500 dark:bg-slate-700 dark:text-slate-300; }
 .status-pill { @apply inline-flex w-fit shrink-0 items-center rounded-full px-2.5 py-1 text-xs font-semibold; }
 .status-neutral { @apply bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300; }
 .status-success { @apply bg-emerald-50 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300; }
@@ -302,6 +303,10 @@ onMounted(loadSettings)
 .ghost-button { @apply inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-100 disabled:opacity-50 dark:text-slate-300 dark:hover:bg-slate-700; }
 .primary-button { @apply inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-blue-700 disabled:opacity-50; }
 .code-chip { @apply inline-flex h-8 items-center gap-1.5 rounded-lg border border-blue-200 bg-blue-50 px-2.5 text-sm font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-500/10 dark:text-blue-300; }
+.help-details summary { @apply inline-flex cursor-pointer list-none items-center gap-1 text-sm font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300; }
+.help-details summary::after { content: ''; @apply h-1.5 w-1.5 rotate-45 border-b border-r border-current transition-transform; }
+.help-details[open] summary::after { @apply rotate-[225deg]; }
+.help-details p { @apply mt-2 max-w-2xl text-sm leading-6 text-slate-500 dark:text-slate-400; }
 .action-bar-enter-active, .action-bar-leave-active { transition: opacity 0.16s ease, transform 0.16s ease; }
 .action-bar-enter-from, .action-bar-leave-to { opacity: 0; transform: translateY(8px); }
 </style>
