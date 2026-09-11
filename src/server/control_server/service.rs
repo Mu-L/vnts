@@ -4,7 +4,7 @@ use crate::server::control_server::db::{
     ClientType, DeviceIpType, Ikev2InputRoute, NetworkRecord, NetworkSource, NetworkType,
 };
 use crate::server::network_state_provider::{
-    NetworkState, NetworkStateProvider, i64_to_system_time,
+    NetworkState, NetworkStateProvider, format_system_time_local, i64_to_system_time,
 };
 use anyhow::{Context, bail};
 use base64::Engine;
@@ -19,8 +19,6 @@ use std::collections::{HashMap, HashSet};
 use std::net::Ipv4Addr;
 use std::sync::Arc;
 use std::time::SystemTime;
-use time::OffsetDateTime;
-use time::macros::format_description;
 use tokio::sync::mpsc::Sender;
 use tokio::time::{Duration, Instant};
 
@@ -1726,40 +1724,32 @@ impl ControlService {
             state.get_device_infos()
         } else {
             match db::load_all_devices(network_code).await {
-                Ok(records) => {
-                    let format =
-                        format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
-                    records
-                        .into_iter()
-                        .map(|r| {
-                            let last_connect_time: OffsetDateTime =
-                                i64_to_system_time(r.last_connect_time).into();
-                            DeviceInfoVO {
-                                device_id: r.device_id,
-                                device_name: r.device_name,
-                                device_version: r.device_version,
-                                ip: r.ip.as_ref().and_then(|s| s.parse().ok()),
-                                current_ip: None,
-                                ip_type: Some(r.ip_type),
-                                status: "Offline".to_string(),
-                                last_connect_time: last_connect_time
-                                    .format(&format)
-                                    .unwrap_or_default(),
-                                disconnect_time: None,
-                                latency_ms: None,
-                                server_addr: None,
-                                advertised_subnets: Vec::new(),
-                                ikev2_output_subnets: r.ikev2_output_subnets,
-                                ikev2_input_routes: r.ikev2_input_routes,
-                                wireguard_output_subnets: r.wireguard_output_subnets,
-                                wireguard_input_routes: r.wireguard_input_routes,
-                                tx_bytes: r.tx_bytes as u64,
-                                rx_bytes: r.rx_bytes as u64,
-                                client_type: r.client_type,
-                            }
-                        })
-                        .collect()
-                }
+                Ok(records) => records
+                    .into_iter()
+                    .map(|r| DeviceInfoVO {
+                        device_id: r.device_id,
+                        device_name: r.device_name,
+                        device_version: r.device_version,
+                        ip: r.ip.as_ref().and_then(|s| s.parse().ok()),
+                        current_ip: None,
+                        ip_type: Some(r.ip_type),
+                        status: "Offline".to_string(),
+                        last_connect_time: format_system_time_local(i64_to_system_time(
+                            r.last_connect_time,
+                        )),
+                        disconnect_time: None,
+                        latency_ms: None,
+                        server_addr: None,
+                        advertised_subnets: Vec::new(),
+                        ikev2_output_subnets: r.ikev2_output_subnets,
+                        ikev2_input_routes: r.ikev2_input_routes,
+                        wireguard_output_subnets: r.wireguard_output_subnets,
+                        wireguard_input_routes: r.wireguard_input_routes,
+                        tx_bytes: r.tx_bytes as u64,
+                        rx_bytes: r.rx_bytes as u64,
+                        client_type: r.client_type,
+                    })
+                    .collect(),
                 Err(e) => {
                     log::error!("Failed to load devices from DB: {}", e);
                     return None;

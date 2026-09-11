@@ -119,6 +119,23 @@ pub fn i64_to_system_time(ts: i64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(ts as u64)
 }
 
+/// Formats timestamps for the management UI in the server's local time zone.
+///
+/// Timestamps remain stored and transmitted as Unix timestamps (UTC); only their
+/// human-readable representation is localized.
+pub fn format_system_time_local(time: SystemTime) -> String {
+    use time::macros::format_description;
+    use time::{OffsetDateTime, UtcOffset};
+
+    let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
+    let datetime: OffsetDateTime = time.into();
+    let local_offset = UtcOffset::local_offset_at(datetime).unwrap_or(UtcOffset::UTC);
+    datetime
+        .to_offset(local_offset)
+        .format(&format)
+        .unwrap_or_default()
+}
+
 impl DeviceEntry {
     fn from_record(record: DeviceRecord) -> Self {
         let ip = record.ip.as_ref().and_then(|s| s.parse().ok());
@@ -744,12 +761,8 @@ impl NetworkState {
     }
 
     pub fn get_device_infos(&self) -> Vec<crate::server::control_server::service::DeviceInfoVO> {
-        use time::OffsetDateTime;
-        use time::macros::format_description;
-
         let guard = self.lease_state.lock();
         let mut list = Vec::new();
-        let format = format_description!("[year]-[month]-[day] [hour]:[minute]:[second]");
         let active_ips: HashMap<&str, Ipv4Addr> = guard
             .active_ip_map
             .iter()
@@ -757,9 +770,6 @@ impl NetworkState {
             .collect();
 
         for entry in guard.device_map.values() {
-            let last_connect_time: OffsetDateTime = entry.last_connect_time.into();
-            let disconnect_time: Option<OffsetDateTime> = entry.disconnect_time.map(|d| d.into());
-
             list.push(crate::server::control_server::service::DeviceInfoVO {
                 device_id: entry.device_id.clone(),
                 device_name: entry.device_name.clone(),
@@ -772,8 +782,8 @@ impl NetworkState {
                 } else {
                     "Offline".to_string()
                 },
-                last_connect_time: last_connect_time.format(&format).unwrap_or_default(),
-                disconnect_time: disconnect_time.map(|d| d.format(&format).unwrap_or_default()),
+                last_connect_time: format_system_time_local(entry.last_connect_time),
+                disconnect_time: entry.disconnect_time.map(format_system_time_local),
                 latency_ms: entry.latency_ms,
                 server_addr: None,
                 advertised_subnets: if entry.subnet_advertisement_active {
